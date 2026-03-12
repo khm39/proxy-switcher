@@ -76,8 +76,11 @@ impl AppState {
     /// Start or restart the transparent proxy with the active proxy config.
     /// If no active proxy, stops the proxy.
     pub fn apply_proxy(&mut self) {
+        log::info!("apply_proxy() called");
+
         // Stop existing proxy
         if let Some(handle) = self.proxy_handle.take() {
+            log::info!("Stopping existing proxy");
             handle.stop();
         }
 
@@ -88,6 +91,7 @@ impl AppState {
             .cloned();
 
         let Some(proxy) = proxy else {
+            log::info!("No active proxy configured");
             let mut s = self.proxy_status.lock().unwrap();
             s.running = false;
             s.error = None;
@@ -95,7 +99,11 @@ impl AppState {
             return;
         };
 
+        log::info!("Active proxy: {} ({}://{}:{})",
+            proxy.name, proxy.proxy_type, proxy.host, proxy.port);
+
         if proxy.host.is_empty() {
+            log::warn!("Proxy host is empty, skipping");
             let mut s = self.proxy_status.lock().unwrap();
             s.running = false;
             s.error = Some("Proxy host is empty".to_string());
@@ -105,11 +113,14 @@ impl AppState {
         let config = UpstreamConfig::from_proxy(&proxy);
         let ctx = self.egui_ctx.clone().unwrap_or_else(|| egui::Context::default());
 
+        log::info!("Starting local proxy...");
         match local_proxy::start(&self.rt, config, self.proxy_status.clone(), ctx) {
             Ok(handle) => {
+                log::info!("Local proxy started successfully");
                 self.proxy_handle = Some(handle);
             }
             Err(e) => {
+                log::error!("Local proxy start failed: {e}");
                 let mut s = self.proxy_status.lock().unwrap();
                 s.running = false;
                 s.error = Some(e);

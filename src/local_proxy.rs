@@ -213,6 +213,11 @@ impl Default for ProxyStatus {
 // ---------------------------------------------------------------------------
 
 fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
+    log::info!("Creating TUN device: name={}, addr={}/{}, mtu={}",
+        TUN_NAME, TUN_ADDR, TUN_CIDR_PREFIX, TUN_MTU);
+    log::info!("Platform: {}", std::env::consts::OS);
+    log::info!("Arch: {}", std::env::consts::ARCH);
+
     let mut builder = tun_rs::DeviceBuilder::new();
     builder = builder
         .name(TUN_NAME)
@@ -222,26 +227,45 @@ fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
     // On Windows, resolve wintun.dll path relative to the executable
     #[cfg(target_os = "windows")]
     {
-        if let Some(dll_path) = find_wintun_dll() {
-            builder = builder.wintun_file(dll_path);
+        let dll_path = find_wintun_dll();
+        match &dll_path {
+            Some(path) => log::info!("wintun.dll found: {}", path),
+            None => log::warn!("wintun.dll not found in any search path, using tun-rs default"),
+        }
+        if let Some(path) = dll_path {
+            builder = builder.wintun_file(path);
         }
     }
 
-    builder.build_async().map_err(|e| {
+    log::info!("Calling tun-rs build_async()...");
+    let result = builder.build_async();
+
+    match &result {
+        Ok(_dev) => {
+            log::info!("TUN device created successfully");
+        }
+        Err(e) => {
+            log::error!("TUN device creation failed: {e}");
+            log::error!("Error debug: {e:?}");
+        }
+    }
+
+    result.map_err(|e| {
         let msg = format!("{e}");
-        if msg.contains("LoadLibrary") || msg.contains("wintun") {
+        let debug_msg = format!("{e:?}");
+        if msg.contains("LoadLibrary") || msg.contains("wintun") || debug_msg.contains("LoadLibrary") {
             format!(
                 "Wintun driver not found. Please download wintun.dll from \
                  https://www.wintun.net/ and place it next to the executable \
-                 or in the current directory. (Details: {e})"
+                 or in the current directory. (Error: {msg}) (Debug: {debug_msg})"
             )
         } else if msg.contains("permission") || msg.contains("denied") || msg.contains("EPERM") {
             format!(
                 "Permission denied creating TUN device. \
-                 Run as Administrator (Windows) or root (Linux). (Details: {e})"
+                 Run as Administrator (Windows) or root (Linux). (Error: {msg})"
             )
         } else {
-            format!("Failed to create TUN device: {e}")
+            format!("Failed to create TUN device: {msg} (Debug: {debug_msg})")
         }
     })
 }
@@ -249,25 +273,77 @@ fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
 /// Search for wintun.dll in common locations.
 #[cfg(target_os = "windows")]
 fn find_wintun_dll() -> Option<String> {
+    log::info!("Searching for wintun.dll...");
+
     // 1. Next to the executable
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let candidate = exe_dir.join("wintun.dll");
+    match std::env::current_exe() {
+        Ok(exe_path) => {
+            log::info!("  exe path: {}", exe_path.display());
+            if let Some(exe_dir) = exe_path.parent() {
+                let candidate = exe_dir.join("wintun.dll");
+                log::info!("  checking: {} -> exists={}", candidate.display(), candidate.exists());
+                if candidate.exists() {
+                    return Some(candidate.to_string_lossy().into_owned());
+                }
+            }
+        }
+        Err(e) => log::warn!("  current_exe() failed: {e}"),
+    }
+
+    // 2. Current working directory
+    match std::env::current_dir() {
+        Ok(cwd) => {
+            log::info!("  cwd: {}", cwd.display());
+            let candidate = cwd.join("wintun.dll");
+            log::info!("  checking: {} -> exists={}", candidate.display(), candidate.exists());
             if candidate.exists() {
                 return Some(candidate.to_string_lossy().into_owned());
             }
         }
+        Err(e) => log::warn!("  current_dir() failed: {e}"),
     }
 
-    // 2. Current working directory
+    // 3. Check PATH directories
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(';') {
+            let candidate = std::path::PathBuf::from(dir).join("wintun.dll");
+            if candidate.exists() {
+                log::info!("  found in PATH: {}", candidate.display());
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+        log::info!("  not found in any PATH directory");
+    }
+
+    // 4. List files in exe dir and cwd for debugging
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            log::info!("  Files in exe dir ({}):", exe_dir.display());
+            if let Ok(entries) = std::fs::read_dir(exe_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.ends_with(".dll") || name_str.contains("wintun") {
+                        log::info!("    {}", name_str);
+                    }
+                }
+            }
+        }
+    }
     if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join("wintun.dll");
-        if candidate.exists() {
-            return Some(candidate.to_string_lossy().into_owned());
+        log::info!("  Files in cwd ({}):", cwd.display());
+        if let Ok(entries) = std::fs::read_dir(&cwd) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".dll") || name_str.contains("wintun") {
+                    log::info!("    {}", name_str);
+                }
+            }
         }
     }
 
-    // 3. Let tun-rs use its default search (system PATH etc.)
+    log::warn!("wintun.dll not found anywhere");
     None
 }
 
