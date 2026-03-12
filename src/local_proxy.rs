@@ -363,6 +363,7 @@ mod win_route {
     const NO_ERROR: u32 = 0;
     const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
     const ERROR_OBJECT_ALREADY_EXISTS: u32 = 5010;
+    const MIB_IPROUTE_TYPE_DIRECT: u32 = 3;
     const MIB_IPROUTE_TYPE_INDIRECT: u32 = 4;
     const MIB_IPPROTO_NETMGMT: u32 = 3;
 
@@ -545,14 +546,21 @@ mod win_route {
         gateway_nbo: u32,
         if_index: u32,
         metric: u32,
+        on_link: bool,
     ) -> Result<(), String> {
+        let (fwd_type, fwd_hop) = if on_link {
+            // On-link / direct: packets go straight to the interface, no gateway
+            (MIB_IPROUTE_TYPE_DIRECT, ip_to_nbo(Ipv4Addr::UNSPECIFIED))
+        } else {
+            (MIB_IPROUTE_TYPE_INDIRECT, gateway_nbo)
+        };
         let row = MIB_IPFORWARDROW {
             dwForwardDest: ip_to_nbo(dest),
             dwForwardMask: ip_to_nbo(mask),
             dwForwardPolicy: 0,
-            dwForwardNextHop: gateway_nbo,
+            dwForwardNextHop: fwd_hop,
             dwForwardIfIndex: if_index,
-            dwForwardType: MIB_IPROUTE_TYPE_INDIRECT,
+            dwForwardType: fwd_type,
             dwForwardProto: MIB_IPPROTO_NETMGMT,
             dwForwardAge: 0,
             dwForwardNextHopAS: 0,
@@ -864,11 +872,18 @@ fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
         let tun_ip: Ipv4Addr = tun_addr.parse().map_err(|e| format!("Invalid TUN address: {e}"))?;
 
         // Step 0: Clean up stale TUN routes from previous runs
-        // These have gw=10.0.85.1 but wrong interface index (from old command-based routing)
+        // Match by gateway=TUN_IP (old style) or by known split-route patterns on TUN interface
         if let Ok(stale_snap) = win_route::RouteTable::read() {
             let tun_nbo = win_route::ip_to_nbo(tun_ip);
+            // Also check if we already know the TUN interface index
+            let stale_tun_if = win_route::find_if_index_by_ip(tun_ip);
             for entry in stale_snap.entries() {
-                if entry.dwForwardNextHop == tun_nbo {
+                let is_tun_gw = entry.dwForwardNextHop == tun_nbo;
+                let is_tun_onlink = stale_tun_if.map_or(false, |idx| {
+                    entry.dwForwardIfIndex == idx
+                    && entry.dwForwardNextHop == 0
+                });
+                if is_tun_gw || is_tun_onlink {
                     let dest = win_route::nbo_to_ip(entry.dwForwardDest);
                     let mask = win_route::nbo_to_ip(entry.dwForwardMask);
                     log::info!("Cleaning stale TUN route: {}/{} if={}", dest, mask, entry.dwForwardIfIndex);
@@ -916,26 +931,30 @@ fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
                 gw_row.dwForwardNextHop,
                 gw_row.dwForwardIfIndex,
                 1,
+                false, // indirect: via gateway
             )?;
         } else {
             log::warn!("No original default gateway found! Routing loop risk.");
         }
 
         // Step 4: Split default routes via TUN (0.0.0.0/1 + 128.0.0.0/1)
-        let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
+        // Use on-link (DIRECT) routing: packets go straight to the TUN interface.
+        // This avoids error 160 when TUN IP overlaps with physical NIC subnet.
         win_route::create_route(
             Ipv4Addr::new(0, 0, 0, 0),
             Ipv4Addr::new(128, 0, 0, 0),
-            tun_gw_nbo,
+            0, // unused for on-link
             tun_if_idx,
             1,
+            true, // on-link
         )?;
         win_route::create_route(
             Ipv4Addr::new(128, 0, 0, 0),
             Ipv4Addr::new(128, 0, 0, 0),
-            tun_gw_nbo,
+            0, // unused for on-link
             tun_if_idx,
             1,
+            true, // on-link
         )?;
 
         // Step 5: Verify
@@ -987,21 +1006,21 @@ fn remove_routes(upstream_host: &str, tun_addr: &str) {
 
     #[cfg(target_os = "windows")]
     {
-        let tun_ip: Ipv4Addr = tun_addr.parse().unwrap_or(Ipv4Addr::new(10, 0, 85, 1));
-        let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
+        let tun_ip: Ipv4Addr = tun_addr.parse().unwrap_or(Ipv4Addr::new(198, 18, 0, 1));
 
-        // Remove TUN split routes
+        // Remove TUN split routes (on-link: gateway = 0.0.0.0)
         if let Some(tun_if_idx) = win_route::find_if_index_by_ip(tun_ip) {
+            let zero_gw = win_route::ip_to_nbo(Ipv4Addr::UNSPECIFIED);
             win_route::delete_route(
                 Ipv4Addr::new(0, 0, 0, 0),
                 Ipv4Addr::new(128, 0, 0, 0),
-                tun_gw_nbo,
+                zero_gw,
                 tun_if_idx,
             );
             win_route::delete_route(
                 Ipv4Addr::new(128, 0, 0, 0),
                 Ipv4Addr::new(128, 0, 0, 0),
-                tun_gw_nbo,
+                zero_gw,
                 tun_if_idx,
             );
         }
