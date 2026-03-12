@@ -15,7 +15,12 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
         .frame(
             egui::Frame::none()
                 .fill(super::BG_MID)
-                .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
+                .inner_margin(egui::Margin {
+                        left: 20.0,
+                        right: 28.0,
+                        top: 16.0,
+                        bottom: 16.0,
+                    }),
         )
         .show_inside(ui, |ui| {
             let proxy_id = state.selected_proxy_id.clone();
