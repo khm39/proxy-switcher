@@ -37,9 +37,12 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                 return;
             };
 
-            let proxy = state.data.proxies.iter_mut().find(|p| p.id == proxy_id);
+            // Read header info before ScrollArea to avoid borrow issues
+            let header_info = state.data.proxies.iter().find(|p| p.id == proxy_id).map(|p| {
+                (p.proxy_type.to_string(), p.name.clone(), p.test_status.clone())
+            });
 
-            let Some(proxy) = proxy else {
+            let Some((ptype, pname, test_status)) = header_info else {
                 ui.label(
                     RichText::new("Proxy not found")
                         .size(14.0)
@@ -48,100 +51,75 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                 return;
             };
 
-            // Header: type badge + name + status
-            ui.horizontal(|ui| {
-                super::type_badge(ui, &proxy.proxy_type.to_string());
-                ui.label(
-                    RichText::new(&proxy.name)
-                        .size(22.0)
-                        .strong()
-                        .color(super::TEXT_PRIMARY),
-                );
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (color, text) = match &proxy.test_status {
-                        TestStatus::Idle => (super::COLOR_IDLE, "Untested".to_string()),
-                        TestStatus::Testing => (super::COLOR_TESTING, "Testing...".to_string()),
-                        TestStatus::Success(ms) => (super::COLOR_SUCCESS, format!("{ms}ms")),
-                        TestStatus::Failed(msg) => (super::COLOR_FAILED, msg.clone()),
-                    };
-                    ui.label(
-                        RichText::new(format!("● {text}"))
-                            .size(13.0)
-                            .color(color),
-                    );
-                });
-            });
-
-            ui.add_space(12.0);
-
-            // Tab bar
-            ui.horizontal(|ui| {
-                let tabs = [
-                    (DetailTab::Basic, "Basic Settings"),
-                    (DetailTab::PortFilter, "Port Filter"),
-                    (DetailTab::Note, "Note"),
-                ];
-
-                for (tab, label) in tabs {
-                    let is_active = state.detail_tab == tab;
-                    let (bg, stroke, text_color) = if is_active {
-                        (super::BG_ELEVATED, egui::Stroke::new(1.5, super::ACCENT), super::ACCENT)
-                    } else {
-                        (super::BG_DARK, egui::Stroke::new(1.0, super::BORDER), super::TEXT_SECONDARY)
-                    };
-
-                    let resp = egui::Frame::none()
-                        .fill(bg)
-                        .stroke(stroke)
-                        .rounding(egui::Rounding::same(6.0))
-                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
-                        .show(ui, |ui| {
-                            let text = if is_active {
-                                RichText::new(label).size(13.0).strong().color(text_color)
-                            } else {
-                                RichText::new(label).size(13.0).color(text_color)
-                            };
-                            ui.label(text);
-                        });
-                    if resp.response.interact(egui::Sense::click()).clicked() {
-                        state.detail_tab = tab;
-                    }
-                }
-            });
-
-            ui.add_space(8.0);
-
-            // Bottom-pinned action buttons (rendered first via bottom panel so they
-            // always stay visible regardless of window height)
-            egui::TopBottomPanel::bottom("detail_actions")
-                .frame(
-                    egui::Frame::none()
-                        .fill(super::BG_MID)
-                        .inner_margin(egui::Margin {
-                            left: 0.0,
-                            right: 0.0,
-                            top: 8.0,
-                            bottom: 4.0,
-                        }),
-                )
-                .show_inside(ui, |ui| {
-                    match state.detail_tab {
-                        DetailTab::Basic => {
-                            render_basic_tab_buttons(ui, state, &proxy_id);
-                        }
-                        DetailTab::PortFilter | DetailTab::Note => {
-                            if ui.button(RichText::new("Save").size(13.0)).clicked() {
-                                state.needs_save = true;
-                            }
-                        }
-                    }
-                });
-
-            // Scrollable form content (takes remaining space)
+            // Entire detail panel is scrollable — header, tabs, form, and buttons
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    // Header: type badge + name + status
+                    ui.horizontal(|ui| {
+                        super::type_badge(ui, &ptype);
+                        ui.label(
+                            RichText::new(&pname)
+                                .size(22.0)
+                                .strong()
+                                .color(super::TEXT_PRIMARY),
+                        );
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (color, text) = match &test_status {
+                                TestStatus::Idle => (super::COLOR_IDLE, "Untested".to_string()),
+                                TestStatus::Testing => (super::COLOR_TESTING, "Testing...".to_string()),
+                                TestStatus::Success(ms) => (super::COLOR_SUCCESS, format!("{ms}ms")),
+                                TestStatus::Failed(msg) => (super::COLOR_FAILED, msg.clone()),
+                            };
+                            ui.label(
+                                RichText::new(format!("● {text}"))
+                                    .size(13.0)
+                                    .color(color),
+                            );
+                        });
+                    });
+
+                    ui.add_space(12.0);
+
+                    // Tab bar
+                    ui.horizontal(|ui| {
+                        let tabs = [
+                            (DetailTab::Basic, "Basic Settings"),
+                            (DetailTab::PortFilter, "Port Filter"),
+                            (DetailTab::Note, "Note"),
+                        ];
+
+                        for (tab, label) in tabs {
+                            let is_active = state.detail_tab == tab;
+                            let (bg, stroke, text_color) = if is_active {
+                                (super::BG_ELEVATED, egui::Stroke::new(1.5, super::ACCENT), super::ACCENT)
+                            } else {
+                                (super::BG_DARK, egui::Stroke::new(1.0, super::BORDER), super::TEXT_SECONDARY)
+                            };
+
+                            let resp = egui::Frame::none()
+                                .fill(bg)
+                                .stroke(stroke)
+                                .rounding(egui::Rounding::same(6.0))
+                                .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                                .show(ui, |ui| {
+                                    let text = if is_active {
+                                        RichText::new(label).size(13.0).strong().color(text_color)
+                                    } else {
+                                        RichText::new(label).size(13.0).color(text_color)
+                                    };
+                                    ui.label(text);
+                                });
+                            if resp.response.interact(egui::Sense::click()).clicked() {
+                                state.detail_tab = tab;
+                            }
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Tab content (form)
                     match state.detail_tab {
                         DetailTab::Basic => {
                             render_basic_tab_form(ui, state, &proxy_id);
@@ -151,6 +129,20 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                         }
                         DetailTab::Note => {
                             render_note_tab_form(ui, state, &proxy_id);
+                        }
+                    }
+
+                    ui.add_space(12.0);
+
+                    // Action buttons
+                    match state.detail_tab {
+                        DetailTab::Basic => {
+                            render_basic_tab_buttons(ui, state, &proxy_id);
+                        }
+                        DetailTab::PortFilter | DetailTab::Note => {
+                            if ui.button(RichText::new("Save").size(13.0)).clicked() {
+                                state.needs_save = true;
+                            }
                         }
                     }
                 });
