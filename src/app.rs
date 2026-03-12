@@ -1,3 +1,4 @@
+use crate::local_proxy::{self, ProxyHandle, ProxyStatus, UpstreamConfig};
 use crate::models::{AppData, TestStatus};
 use crate::ui::detail::DetailTab;
 use std::sync::{Arc, Mutex};
@@ -15,8 +16,9 @@ pub struct AppState {
     pub detail_tab: DetailTab,
     pub show_password: bool,
 
-    // System proxy feedback
-    pub system_proxy_message: Option<(bool, String)>, // (success, message)
+    // Local transparent proxy
+    pub proxy_handle: Option<ProxyHandle>,
+    pub proxy_status: Arc<Mutex<ProxyStatus>>,
 
     // Async test tracking
     pub pending_test: Option<(String, Arc<Mutex<TestStatus>>)>,
@@ -26,6 +28,9 @@ pub struct AppState {
 
     // Save error message
     pub save_error: Option<String>,
+
+    // egui context for repaint requests
+    pub egui_ctx: Option<egui::Context>,
 }
 
 impl AppState {
@@ -39,10 +44,12 @@ impl AppState {
             selected_proxy_id: None,
             detail_tab: DetailTab::Basic,
             show_password: false,
-            system_proxy_message: None,
+            proxy_handle: None,
+            proxy_status: Arc::new(Mutex::new(ProxyStatus::default())),
             pending_test: None,
             needs_save: false,
             save_error: None,
+            egui_ctx: None,
         }
     }
 
@@ -53,7 +60,6 @@ impl AppState {
             match &status {
                 TestStatus::Testing => {} // still running
                 _ => {
-                    // Apply result to the proxy
                     let pid = proxy_id.clone();
                     for profile in &mut self.data.profiles {
                         if let Some(proxy) = profile.proxies.iter_mut().find(|p| p.id == pid) {
@@ -67,19 +73,48 @@ impl AppState {
         }
     }
 
-    /// Apply the active profile's active proxy to the system, or clear if none.
-    pub fn apply_system_proxy(&mut self) {
+    /// Start or restart the transparent proxy with the active proxy config.
+    /// If no active proxy, stops the proxy.
+    pub fn apply_proxy(&mut self) {
+        // Stop existing proxy
+        if let Some(handle) = self.proxy_handle.take() {
+            handle.stop();
+        }
+
         let proxy = self
             .data
             .active_profile()
             .and_then(|p| p.active_proxy())
             .cloned();
 
-        let result = match proxy {
-            Some(ref p) => crate::system_proxy::apply_proxy(p),
-            None => crate::system_proxy::clear_proxy(),
+        let Some(proxy) = proxy else {
+            let mut s = self.proxy_status.lock().unwrap();
+            s.running = false;
+            s.error = None;
+            s.tun_addr.clear();
+            return;
         };
-        self.system_proxy_message = Some((result.success, result.message));
+
+        if proxy.host.is_empty() {
+            let mut s = self.proxy_status.lock().unwrap();
+            s.running = false;
+            s.error = Some("Proxy host is empty".to_string());
+            return;
+        }
+
+        let config = UpstreamConfig::from_proxy(&proxy);
+        let ctx = self.egui_ctx.clone().unwrap_or_else(|| egui::Context::default());
+
+        match local_proxy::start(&self.rt, config, self.proxy_status.clone(), ctx) {
+            Ok(handle) => {
+                self.proxy_handle = Some(handle);
+            }
+            Err(e) => {
+                let mut s = self.proxy_status.lock().unwrap();
+                s.running = false;
+                s.error = Some(e);
+            }
+        }
     }
 
     fn do_save(&mut self) {
@@ -105,54 +140,49 @@ pub struct App {
 
 impl App {
     pub fn new(_cc: &eframe::CreationContext<'_>, rt: Arc<tokio::runtime::Runtime>) -> Self {
-        let mut state = AppState::new(rt);
-        // Apply system proxy from saved config on startup
-        if state.data.active_profile().and_then(|p| p.active_proxy()).is_some() {
-            state.apply_system_proxy();
+        Self {
+            state: AppState::new(rt),
         }
-        Self { state }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Store egui context for repaint requests
+        if self.state.egui_ctx.is_none() {
+            self.state.egui_ctx = Some(ctx.clone());
+        }
+
         // Poll async test results
         self.state.poll_test_result();
 
-        // Top panel: title bar + system proxy status
+        // Top panel: title bar + proxy status
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("PROXY MANAGER");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let has_active = self
-                        .state
-                        .data
-                        .active_profile()
-                        .and_then(|p| p.active_proxy())
-                        .is_some();
-                    if has_active {
+                    let status = self.state.proxy_status.lock().unwrap();
+                    if status.running {
                         ui.label(
-                            egui::RichText::new("SYSTEM PROXY [ON]")
+                            egui::RichText::new(format!("TUN PROXY [ON] {}", status.tun_addr))
                                 .color(crate::ui::COLOR_SUCCESS),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("({} conns)", status.connections))
+                                .small()
+                                .color(egui::Color32::GRAY),
                         );
                     } else {
                         ui.label(
-                            egui::RichText::new("SYSTEM PROXY [OFF]")
+                            egui::RichText::new("TUN PROXY [OFF]")
                                 .color(crate::ui::COLOR_IDLE),
                         );
                     }
+                    if let Some(err) = &status.error {
+                        ui.colored_label(crate::ui::COLOR_FAILED, err.as_str());
+                    }
                 });
             });
-
-            // Show system proxy feedback
-            if let Some((success, msg)) = &self.state.system_proxy_message {
-                let color = if *success {
-                    crate::ui::COLOR_SUCCESS
-                } else {
-                    crate::ui::COLOR_FAILED
-                };
-                ui.colored_label(color, msg.as_str());
-            }
 
             // Show save error if any
             if let Some(err) = &self.state.save_error {
@@ -177,6 +207,10 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Stop the transparent proxy
+        if let Some(handle) = self.state.proxy_handle.take() {
+            handle.stop();
+        }
         let _ = crate::storage::save(&self.state.data);
     }
 }

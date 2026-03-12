@@ -177,7 +177,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                         }) {
                             profile.active_proxy_id = Some(proxy_id.clone());
                             state.needs_save = true;
-                            state.apply_system_proxy();
+                            state.apply_proxy();
                         }
                     }
                 });

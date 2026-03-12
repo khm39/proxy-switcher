@@ -106,7 +106,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                     state.needs_save = true;
                 }
                 if was_active_proxy {
-                    state.apply_system_proxy();
+                    state.apply_proxy();
                 }
             }
 

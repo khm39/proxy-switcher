@@ -80,7 +80,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                                 state.selected_proxy_id = None;
                                 state.needs_save = true;
                                 if was_active {
-                                    state.apply_system_proxy();
+                                    state.apply_proxy();
                                 }
                             }
                         }
@@ -92,7 +92,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                     if let Some(sel_id) = state.selected_profile_id.clone() {
                         state.data.active_profile_id = Some(sel_id);
                         state.needs_save = true;
-                        state.apply_system_proxy();
+                        state.apply_proxy();
                     }
                 }
 
