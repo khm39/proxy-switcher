@@ -112,9 +112,10 @@ impl AppState {
 
         let config = UpstreamConfig::from_proxy(&proxy);
         let ctx = self.egui_ctx.clone().unwrap_or_else(|| egui::Context::default());
+        let tun_addr = self.data.tun_addr.clone();
 
         log::info!("Starting local proxy...");
-        match local_proxy::start(&self.rt, config, self.proxy_status.clone(), ctx) {
+        match local_proxy::start(&self.rt, config, self.proxy_status.clone(), ctx, &tun_addr) {
             Ok(handle) => {
                 log::info!("Local proxy started successfully");
                 self.proxy_handle = Some(handle);

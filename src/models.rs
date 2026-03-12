@@ -204,6 +204,12 @@ impl Profile {
 pub struct AppData {
     pub profiles: Vec<Profile>,
     pub active_profile_id: Option<String>,
+    #[serde(default = "default_tun_addr")]
+    pub tun_addr: String,
+}
+
+fn default_tun_addr() -> String {
+    "10.0.85.1".to_string()
 }
 
 impl Default for AppData {
@@ -213,6 +219,7 @@ impl Default for AppData {
         Self {
             profiles: vec![default_profile],
             active_profile_id: Some(id),
+            tun_addr: default_tun_addr(),
         }
     }
 }

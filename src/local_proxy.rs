@@ -24,7 +24,6 @@ use tokio::sync::broadcast;
 // Constants
 // ---------------------------------------------------------------------------
 
-const TUN_ADDR: &str = "10.0.85.1";
 const TUN_NAME: &str = "proxyswitch0";
 const TUN_MTU: u16 = 1500;
 const SMOL_TCP_BUF: usize = 65535;
@@ -202,15 +201,15 @@ impl Default for ProxyStatus {
 // TUN device creation via tun-rs
 // ---------------------------------------------------------------------------
 
-fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
+fn create_tun_device(tun_addr: &str) -> Result<tun_rs::AsyncDevice, String> {
     log::info!("Creating TUN device: name={}, addr={}/24, mtu={}",
-        TUN_NAME, TUN_ADDR, TUN_MTU);
+        TUN_NAME, tun_addr, TUN_MTU);
     log::info!("Platform: {}, Arch: {}", std::env::consts::OS, std::env::consts::ARCH);
 
     let mut builder = tun_rs::DeviceBuilder::new();
     builder = builder
         .name(TUN_NAME)
-        .ipv4(TUN_ADDR, 24, None)
+        .ipv4(tun_addr, 24, None)
         .mtu(TUN_MTU);
 
     #[cfg(target_os = "windows")]
@@ -805,7 +804,8 @@ mod linux_route {
 
 // ---- Common route management ----
 
-fn add_routes(upstream_host: &str) -> Result<(), String> {
+#[allow(unused_variables)]
+fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
     let upstream_ip = resolve_to_ipv4(upstream_host)?;
     log::info!("Adding routes (upstream={} -> {})", upstream_host, upstream_ip);
 
@@ -861,7 +861,7 @@ fn add_routes(upstream_host: &str) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let tun_ip: Ipv4Addr = TUN_ADDR.parse().unwrap();
+        let tun_ip: Ipv4Addr = tun_addr.parse().map_err(|e| format!("Invalid TUN address: {e}"))?;
 
         // Step 0: Clean up stale TUN routes from previous runs
         // These have gw=10.0.85.1 but wrong interface index (from old command-based routing)
@@ -952,7 +952,8 @@ fn add_routes(upstream_host: &str) -> Result<(), String> {
     }
 }
 
-fn remove_routes(upstream_host: &str) {
+#[allow(unused_variables)]
+fn remove_routes(upstream_host: &str, tun_addr: &str) {
     let upstream_ip = match resolve_to_ipv4(upstream_host) {
         Ok(ip) => ip,
         Err(e) => {
@@ -986,7 +987,7 @@ fn remove_routes(upstream_host: &str) {
 
     #[cfg(target_os = "windows")]
     {
-        let tun_ip: Ipv4Addr = TUN_ADDR.parse().unwrap();
+        let tun_ip: Ipv4Addr = tun_addr.parse().unwrap_or(Ipv4Addr::new(10, 0, 85, 1));
         let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
 
         // Remove TUN split routes
@@ -1154,13 +1155,18 @@ pub fn start(
     config: UpstreamConfig,
     status: Arc<Mutex<ProxyStatus>>,
     ctx: egui::Context,
+    tun_addr: &str,
 ) -> Result<ProxyHandle, String> {
-    let tun_device = create_tun_device()?;
-    add_routes(&config.host)?;
+    // Validate TUN address early
+    let _: Ipv4Addr = tun_addr.parse().map_err(|e| format!("Invalid TUN address '{}': {}", tun_addr, e))?;
+
+    let tun_device = create_tun_device(tun_addr)?;
+    add_routes(&config.host, tun_addr)?;
 
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-    let listen_info = format!("TUN {} ({})", TUN_NAME, TUN_ADDR);
+    let listen_info = format!("TUN {} ({})", TUN_NAME, tun_addr);
     let upstream_host = config.host.clone();
+    let tun_addr_owned = tun_addr.to_string();
 
     {
         let mut s = status.lock().unwrap();
@@ -1170,7 +1176,7 @@ pub fn start(
     }
     ctx.request_repaint();
 
-    rt.spawn(proxy_loop(tun_device, config, shutdown_rx, status, ctx, upstream_host));
+    rt.spawn(proxy_loop(tun_device, config, shutdown_rx, status, ctx, upstream_host, tun_addr_owned));
 
     Ok(ProxyHandle { shutdown_tx })
 }
@@ -1182,6 +1188,7 @@ async fn proxy_loop(
     status: Arc<Mutex<ProxyStatus>>,
     ctx: egui::Context,
     upstream_host: String,
+    tun_addr: String,
 ) {
     let tun = Arc::new(tun_device);
     let config = Arc::new(config);
@@ -1422,7 +1429,7 @@ async fn proxy_loop(
     }
 
     // Cleanup
-    remove_routes(&upstream_host);
+    remove_routes(&upstream_host, &tun_addr);
     {
         let mut s = status.lock().unwrap();
         s.running = false;

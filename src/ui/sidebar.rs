@@ -116,6 +116,26 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                         );
                     }
                 }
+
+                ui.separator();
+
+                // TUN settings
+                ui.label(RichText::new("TUN SETTINGS").strong().small());
+                ui.horizontal(|ui| {
+                    ui.label("TUN IP:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut state.data.tun_addr)
+                            .desired_width(120.0),
+                    );
+                    if resp.changed() {
+                        state.needs_save = true;
+                    }
+                });
+                ui.label(
+                    RichText::new("Restart proxy to apply")
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
             });
         });
 }
