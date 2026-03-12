@@ -209,7 +209,7 @@ pub struct AppData {
 }
 
 fn default_tun_addr() -> String {
-    "198.18.0.1".to_string()
+    "172.29.0.1/24".to_string()
 }
 
 impl Default for AppData {

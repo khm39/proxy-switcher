@@ -198,18 +198,47 @@ impl Default for ProxyStatus {
 }
 
 // ---------------------------------------------------------------------------
+// CIDR parsing helper
+// ---------------------------------------------------------------------------
+
+/// Parse "IP/prefix" (e.g. "172.29.0.1/24") or plain IP (defaults to /24).
+fn parse_tun_cidr(input: &str) -> Result<(Ipv4Addr, u8), String> {
+    if let Some((ip_str, prefix_str)) = input.split_once('/') {
+        let ip: Ipv4Addr = ip_str
+            .trim()
+            .parse()
+            .map_err(|e| format!("Invalid TUN IP '{}': {}", ip_str, e))?;
+        let prefix: u8 = prefix_str
+            .trim()
+            .parse()
+            .map_err(|e| format!("Invalid prefix length '{}': {}", prefix_str, e))?;
+        if prefix > 32 {
+            return Err(format!("Prefix length {} exceeds 32", prefix));
+        }
+        Ok((ip, prefix))
+    } else {
+        let ip: Ipv4Addr = input
+            .trim()
+            .parse()
+            .map_err(|e| format!("Invalid TUN IP '{}': {}", input, e))?;
+        Ok((ip, 24))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TUN device creation via tun-rs
 // ---------------------------------------------------------------------------
 
 fn create_tun_device(tun_addr: &str) -> Result<tun_rs::AsyncDevice, String> {
-    log::info!("Creating TUN device: name={}, addr={}/24, mtu={}",
-        TUN_NAME, tun_addr, TUN_MTU);
+    let (ip, prefix) = parse_tun_cidr(tun_addr)?;
+    log::info!("Creating TUN device: name={}, addr={}/{}, mtu={}",
+        TUN_NAME, ip, prefix, TUN_MTU);
     log::info!("Platform: {}, Arch: {}", std::env::consts::OS, std::env::consts::ARCH);
 
     let mut builder = tun_rs::DeviceBuilder::new();
     builder = builder
         .name(TUN_NAME)
-        .ipv4(tun_addr, 24, None)
+        .ipv4(ip, prefix, None)
         .mtu(TUN_MTU);
 
     #[cfg(target_os = "windows")]
@@ -1176,16 +1205,15 @@ pub fn start(
     ctx: egui::Context,
     tun_addr: &str,
 ) -> Result<ProxyHandle, String> {
-    // Validate TUN address early
-    let _: Ipv4Addr = tun_addr.parse().map_err(|e| format!("Invalid TUN address '{}': {}", tun_addr, e))?;
+    let (tun_ip, prefix) = parse_tun_cidr(tun_addr)?;
+    let tun_ip_str = tun_ip.to_string();
 
     let tun_device = create_tun_device(tun_addr)?;
-    add_routes(&config.host, tun_addr)?;
+    add_routes(&config.host, &tun_ip_str)?;
 
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-    let listen_info = format!("TUN {} ({})", TUN_NAME, tun_addr);
+    let listen_info = format!("TUN {} ({}/{})", TUN_NAME, tun_ip, prefix);
     let upstream_host = config.host.clone();
-    let tun_addr_owned = tun_addr.to_string();
 
     {
         let mut s = status.lock().unwrap();
@@ -1195,7 +1223,7 @@ pub fn start(
     }
     ctx.request_repaint();
 
-    rt.spawn(proxy_loop(tun_device, config, shutdown_rx, status, ctx, upstream_host, tun_addr_owned));
+    rt.spawn(proxy_loop(tun_device, config, shutdown_rx, status, ctx, upstream_host, tun_ip_str));
 
     Ok(ProxyHandle { shutdown_tx })
 }
@@ -1542,6 +1570,34 @@ mod tests {
         assert_eq!(bridge.rx_queue.len(), 1);
         let now = SmolInstant::from_millis(0);
         assert!(bridge.receive(now).is_some());
+    }
+
+    #[test]
+    fn parse_tun_cidr_with_prefix() {
+        let (ip, prefix) = parse_tun_cidr("172.29.0.1/24").unwrap();
+        assert_eq!(ip, Ipv4Addr::new(172, 29, 0, 1));
+        assert_eq!(prefix, 24);
+    }
+
+    #[test]
+    fn parse_tun_cidr_without_prefix() {
+        let (ip, prefix) = parse_tun_cidr("10.0.85.1").unwrap();
+        assert_eq!(ip, Ipv4Addr::new(10, 0, 85, 1));
+        assert_eq!(prefix, 24); // default
+    }
+
+    #[test]
+    fn parse_tun_cidr_narrow_prefix() {
+        let (ip, prefix) = parse_tun_cidr("172.29.0.1/30").unwrap();
+        assert_eq!(ip, Ipv4Addr::new(172, 29, 0, 1));
+        assert_eq!(prefix, 30);
+    }
+
+    #[test]
+    fn parse_tun_cidr_invalid() {
+        assert!(parse_tun_cidr("not.an.ip").is_err());
+        assert!(parse_tun_cidr("172.29.0.1/33").is_err());
+        assert!(parse_tun_cidr("172.29.0.1/abc").is_err());
     }
 
     #[test]
