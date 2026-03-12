@@ -508,10 +508,13 @@ mod win_route {
         pub link_local_address_behavior: i32,          // 72
         pub link_local_address_timeout: u32,           // 76
         pub zone_indices: [u32; 16],                   // 80 (64 bytes)
-        pub site_id: u32,                              // 144
+        pub site_prefix_length: u32,                   // 144
         pub metric: u32,                               // 148
-        // Remaining fields (NlMtu, Connected, etc.) are not needed.
-        _tail: [u8; 20],                               // pad to ~172 bytes total
+        // Remaining: NlMtu(u32), Connected(u8), SupportsWakeUpPatterns(u8),
+        // SupportsNeighborDiscovery(u8), SupportsRouterDiscovery(u8),
+        // ReachableTime(u32), TransmitOffload(u8), ReceiveOffload(u8),
+        // DisableDefaultRoutes(u8), padding(u8)
+        _tail: [u8; 16],                               // 152..168 (total = 168 bytes)
     }
 
     extern "system" {
