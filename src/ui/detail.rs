@@ -318,18 +318,35 @@ fn render_basic_tab(
     }).unwrap_or(false);
 
     ui.horizontal(|ui| {
-        // Test connection button
-        let test_btn = ui.add_enabled(
-            !testing,
-            egui::Button::new(
-                RichText::new(if testing { "Testing..." } else { "Test Connection" })
-                    .size(12.0),
-            ),
-        );
-        if test_btn.clicked() {
-            let status = Arc::new(Mutex::new(TestStatus::Testing));
-            state.pending_test = Some((proxy_id.to_string(), status.clone()));
-            crate::tester::run_test(&state.rt, proxy_url, status, ui.ctx().clone());
+        // Test connection button with animated spinner
+        if testing {
+            let dots = animated_dots(ui);
+            let label = format!("Testing{dots}");
+            let btn = ui.add_enabled(
+                false,
+                egui::Button::new(
+                    RichText::new(label)
+                        .size(12.0)
+                        .color(super::COLOR_TESTING),
+                ),
+            );
+            // Spinner circle next to button
+            let spinner_rect = egui::Rect::from_min_size(
+                btn.rect.right_top() + egui::vec2(6.0, 4.0),
+                egui::vec2(14.0, 14.0),
+            );
+            draw_spinner(ui, spinner_rect);
+            // Keep repainting while testing
+            ui.ctx().request_repaint();
+        } else {
+            let test_btn = ui.add(egui::Button::new(
+                RichText::new("Test Connection").size(12.0),
+            ));
+            if test_btn.clicked() {
+                let status = Arc::new(Mutex::new(TestStatus::Testing));
+                state.pending_test = Some((proxy_id.to_string(), status.clone()));
+                crate::tester::run_test(&state.rt, proxy_url, status, ui.ctx().clone());
+            }
         }
 
         // Set as active button
@@ -521,4 +538,45 @@ fn render_note_tab(
     {
         state.needs_save = true;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Animated testing indicator helpers
+// ---------------------------------------------------------------------------
+
+/// Return an animated dots string ("", ".", "..", "...") cycling every 400ms.
+fn animated_dots(ui: &Ui) -> &'static str {
+    let phase = (ui.input(|i| i.time) * 2.5) as usize % 4;
+    match phase {
+        0 => "",
+        1 => ".",
+        2 => "..",
+        _ => "...",
+    }
+}
+
+/// Draw a small spinning arc indicator.
+fn draw_spinner(ui: &mut Ui, rect: egui::Rect) {
+    let time = ui.input(|i| i.time);
+    let center = rect.center();
+    let radius = rect.width() / 2.0;
+    let start_angle = (time * 4.0) as f32;
+    let arc_len = std::f32::consts::PI * 1.2;
+
+    let n_points = 20;
+    let points: Vec<egui::Pos2> = (0..=n_points)
+        .map(|i| {
+            let t = i as f32 / n_points as f32;
+            let angle = start_angle + t * arc_len;
+            egui::pos2(
+                center.x + radius * angle.cos(),
+                center.y + radius * angle.sin(),
+            )
+        })
+        .collect();
+
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(2.0, super::COLOR_TESTING),
+    ));
 }
