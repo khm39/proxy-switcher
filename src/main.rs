@@ -23,8 +23,8 @@ fn main() {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([960.0, 600.0])
-            .with_min_inner_size([720.0, 450.0]),
+            .with_inner_size([1024.0, 720.0])
+            .with_min_inner_size([800.0, 520.0]),
         ..Default::default()
     };
 

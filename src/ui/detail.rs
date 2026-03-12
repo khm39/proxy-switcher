@@ -15,7 +15,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
         .frame(
             egui::Frame::none()
                 .fill(super::BG_MID)
-                .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
+                .inner_margin(egui::Margin { left: 20.0, right: 24.0, top: 16.0, bottom: 16.0 }),
         )
         .show_inside(ui, |ui| {
             let proxy_id = state.selected_proxy_id.clone();
@@ -281,7 +281,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
 
     state.show_password = show_password;
 
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     // Action buttons
     let proxy_url = state
@@ -300,89 +300,65 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
         .map(|p| matches!(p.test_status, TestStatus::Testing))
         .unwrap_or(false);
 
-    let btn_size = egui::vec2(130.0, 30.0);
-
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 10.0;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
 
         if testing {
             let dots = animated_dots(ui);
             let label = format!("Testing{dots}");
             let btn = ui.add_enabled_ui(false, |ui| {
-                ui.add_sized(
-                    btn_size,
-                    egui::Button::new(
-                        RichText::new(label)
-                            .size(13.0)
-                            .color(super::COLOR_TESTING),
-                    ),
+                ui.button(
+                    RichText::new(label)
+                        .size(13.0)
+                        .color(super::COLOR_TESTING),
                 )
             });
             let spinner_rect = egui::Rect::from_min_size(
-                btn.response.rect.right_top() + egui::vec2(6.0, 8.0),
+                btn.response.rect.right_top() + egui::vec2(4.0, 6.0),
                 egui::vec2(14.0, 14.0),
             );
             draw_spinner(ui, spinner_rect);
             ui.ctx().request_repaint();
         } else {
-            let test_btn = ui.add_sized(
-                btn_size,
-                egui::Button::new(RichText::new("Test Connection").size(13.0)),
-            );
-            if test_btn.clicked() {
+            if ui.button(RichText::new("Test Connection").size(13.0)).clicked() {
                 let status = Arc::new(Mutex::new(TestStatus::Testing));
                 state.pending_test = Some((proxy_id.to_string(), status.clone()));
                 crate::tester::run_test(&state.rt, proxy_url, status, ui.ctx().clone());
             }
         }
 
-        let active_btn = ui.add_sized(
-            btn_size,
-            egui::Button::new(
-                RichText::new("Set as Active")
-                    .size(13.0)
-                    .color(super::ACCENT),
-            ),
-        );
-        if active_btn.clicked() {
+        if ui.button(
+            RichText::new("Set as Active")
+                .size(13.0)
+                .color(super::ACCENT),
+        ).clicked() {
             state.data.active_proxy_id = Some(proxy_id.to_string());
             state.needs_save = true;
             state.apply_proxy();
         }
 
-        let save_btn = ui.add_sized(
-            btn_size,
-            egui::Button::new(RichText::new("Save").size(13.0)),
-        );
-        if save_btn.clicked() {
+        if ui.button(RichText::new("Save").size(13.0)).clicked() {
             state.needs_save = true;
         }
 
-        // Spacer to push delete to the right
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let del_btn = ui.add_sized(
-                btn_size,
-                egui::Button::new(
-                    RichText::new("Delete")
-                        .size(13.0)
-                        .color(super::COLOR_FAILED),
-                ),
-            );
-            if del_btn.clicked() {
-                let was_active = state.data.active_proxy_id.as_ref() == Some(&proxy_id.to_string());
-                state.data.proxies.retain(|p| p.id != proxy_id);
-                if was_active {
-                    state.data.active_proxy_id = None;
-                }
-                if state.selected_proxy_id.as_ref().map(|s| s.as_str()) == Some(proxy_id) {
-                    state.selected_proxy_id = None;
-                }
-                state.needs_save = true;
-                if was_active {
-                    state.apply_proxy();
-                }
+        if ui.button(
+            RichText::new("Delete")
+                .size(13.0)
+                .color(super::COLOR_FAILED),
+        ).clicked() {
+            let was_active = state.data.active_proxy_id.as_ref() == Some(&proxy_id.to_string());
+            state.data.proxies.retain(|p| p.id != proxy_id);
+            if was_active {
+                state.data.active_proxy_id = None;
             }
-        });
+            if state.selected_proxy_id.as_ref().map(|s| s.as_str()) == Some(proxy_id) {
+                state.selected_proxy_id = None;
+            }
+            state.needs_save = true;
+            if was_active {
+                state.apply_proxy();
+            }
+        }
     });
 }
 
