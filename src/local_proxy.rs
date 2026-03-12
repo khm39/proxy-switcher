@@ -475,51 +475,25 @@ mod win_route {
             InterfaceIndex: u32,
             InterfaceLuid: *mut NET_LUID,
         ) -> u32;
+        fn GetIpInterfaceEntry(row: *mut MIB_IPINTERFACE_ROW) -> u32;
+        fn InitializeIpInterfaceEntry(row: *mut MIB_IPINTERFACE_ROW);
     }
 
     // MIB_IPINTERFACE_ROW (netioapi.h) — repr(C) layout matching the Windows SDK.
-    // We define all fields up to and including Metric; the remainder is padded.
+    // Only family, interface_luid, and metric are used; all other fields are private.
     // Reference: https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_ipinterface_row
     #[repr(C)]
-    pub struct MIB_IPINTERFACE_ROW {
-        pub family: u16,                              //  0
-        _pad0: [u8; 6],                               //  2 (align InterfaceLuid to 8)
-        pub interface_luid: NET_LUID,                  //  8
-        pub interface_index: u32,                      // 16
-        pub max_reassembly_size: u32,                  // 20
-        pub interface_identifier: u64,                 // 24
-        pub min_router_advertisement_interval: u32,    // 32
-        pub max_router_advertisement_interval: u32,    // 36
-        pub advertising_enabled: u8,                   // 40
-        pub forwarding_enabled: u8,                    // 41
-        pub weak_host_send: u8,                        // 42
-        pub weak_host_receive: u8,                     // 43
-        pub use_automatic_metric: u8,                  // 44
-        pub use_neighbor_unreachability_detection: u8,  // 45
-        pub managed_address_configuration_supported: u8, // 46
-        pub other_stateful_configuration_supported: u8,  // 47
-        pub advertise_default_route: u8,               // 48
-        _pad1: [u8; 3],                                // 49 (align next i32 to 4)
-        pub router_discovery_behavior: i32,            // 52
-        pub dad_transmits: u32,                        // 56
-        pub base_reachable_time: u32,                  // 60
-        pub retransmit_time: u32,                      // 64
-        pub path_mtu_discovery_timeout: u32,           // 68
-        pub link_local_address_behavior: i32,          // 72
-        pub link_local_address_timeout: u32,           // 76
-        pub zone_indices: [u32; 16],                   // 80 (64 bytes)
-        pub site_prefix_length: u32,                   // 144
-        pub metric: u32,                               // 148
-        // Remaining: NlMtu(u32), Connected(u8), SupportsWakeUpPatterns(u8),
-        // SupportsNeighborDiscovery(u8), SupportsRouterDiscovery(u8),
-        // ReachableTime(u32), TransmitOffload(u8), ReceiveOffload(u8),
-        // DisableDefaultRoutes(u8), padding(u8)
-        _tail: [u8; 16],                               // 152..168 (total = 168 bytes)
-    }
-
-    extern "system" {
-        fn GetIpInterfaceEntry(row: *mut MIB_IPINTERFACE_ROW) -> u32;
-        fn InitializeIpInterfaceEntry(row: *mut MIB_IPINTERFACE_ROW);
+    struct MIB_IPINTERFACE_ROW {
+        family: u16,                              //  0
+        _pad0: [u8; 6],                           //  2 (align InterfaceLuid to 8)
+        interface_luid: NET_LUID,                  //  8
+        _fields: [u8; 128],                        // 16..144 (interface_index through zone_indices)
+        _site_prefix_length: u32,                  // 144
+        metric: u32,                               // 148
+        // NlMtu, Connected, SupportsWakeUpPatterns, SupportsNeighborDiscovery,
+        // SupportsRouterDiscovery, ReachableTime, TransmitOffload, ReceiveOffload,
+        // DisableDefaultRoutes, padding
+        _tail: [u8; 16],                           // 152..168 (total = 168 bytes)
     }
 
     /// Query the interface metric for the given interface index via GetIpInterfaceEntry.
@@ -963,20 +937,10 @@ fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<
 
         // Step 3: Split default routes via TUN (0.0.0.0/1 + 128.0.0.0/1)
         // More specific than any /0 default route → always wins regardless of metric.
-        linux_route::add_route(
-            Ipv4Addr::new(0, 0, 0, 0),
-            Ipv4Addr::new(128, 0, 0, 0),
-            None,
-            Some(TUN_NAME),
-            1,
-        )?;
-        linux_route::add_route(
-            Ipv4Addr::new(128, 0, 0, 0),
-            Ipv4Addr::new(128, 0, 0, 0),
-            None,
-            Some(TUN_NAME),
-            1,
-        )?;
+        let split_mask = Ipv4Addr::new(128, 0, 0, 0);
+        for dest in [Ipv4Addr::new(0, 0, 0, 0), Ipv4Addr::new(128, 0, 0, 0)] {
+            linux_route::add_route(dest, split_mask, None, Some(TUN_NAME), 1)?;
+        }
 
         // Step 4: Verify
         linux_route::log_route_table();
@@ -1043,13 +1007,22 @@ fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<
                     .iter()
                     .filter(|e| e.dwForwardIfIndex == tun_if_idx)
                     .min_by_key(|e| e.dwForwardMetric1)
-                    .map(|e| e.dwForwardMetric1)
-                    .unwrap_or(0);
-                log::warn!(
-                    "GetIpInterfaceEntry failed ({}), using route-derived metric: {} (if_idx={})",
-                    e, fallback, tun_if_idx
-                );
-                fallback
+                    .map(|e| e.dwForwardMetric1);
+                match fallback {
+                    Some(m) => {
+                        log::warn!(
+                            "GetIpInterfaceEntry failed ({}), using route-derived metric: {} (if_idx={})",
+                            e, m, tun_if_idx
+                        );
+                        m
+                    }
+                    None => {
+                        return Err(format!(
+                            "Cannot determine TUN interface metric: {} and no existing routes on if_idx={}",
+                            e, tun_if_idx
+                        ));
+                    }
+                }
             }
         };
 
@@ -1076,22 +1049,10 @@ fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<
         // Next hop = TUN gateway IP (e.g. 172.29.0.2), NOT TUN's own IP.
         // Metric must be >= TUN interface metric (Vista+ requirement).
         let tun_gw_nbo = win_route::ip_to_nbo(tun_gw);
-        win_route::create_route(
-            Ipv4Addr::new(0, 0, 0, 0),
-            Ipv4Addr::new(128, 0, 0, 0),
-            tun_gw_nbo,
-            tun_if_idx,
-            tun_if_metric,
-            false, // indirect: via TUN gateway
-        )?;
-        win_route::create_route(
-            Ipv4Addr::new(128, 0, 0, 0),
-            Ipv4Addr::new(128, 0, 0, 0),
-            tun_gw_nbo,
-            tun_if_idx,
-            tun_if_metric,
-            false, // indirect: via TUN gateway
-        )?;
+        let split_mask = Ipv4Addr::new(128, 0, 0, 0);
+        for dest in [Ipv4Addr::new(0, 0, 0, 0), Ipv4Addr::new(128, 0, 0, 0)] {
+            win_route::create_route(dest, split_mask, tun_gw_nbo, tun_if_idx, tun_if_metric, false)?;
+        }
 
         // Step 5: Verify
         if let Ok(snap) = win_route::RouteTable::read() {
@@ -1120,16 +1081,10 @@ fn remove_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) {
 
     #[cfg(target_os = "linux")]
     {
-        linux_route::delete_route(
-            Ipv4Addr::new(0, 0, 0, 0),
-            Ipv4Addr::new(128, 0, 0, 0),
-            Some(TUN_NAME),
-        );
-        linux_route::delete_route(
-            Ipv4Addr::new(128, 0, 0, 0),
-            Ipv4Addr::new(128, 0, 0, 0),
-            Some(TUN_NAME),
-        );
+        let split_mask = Ipv4Addr::new(128, 0, 0, 0);
+        for dest in [Ipv4Addr::new(0, 0, 0, 0), Ipv4Addr::new(128, 0, 0, 0)] {
+            linux_route::delete_route(dest, split_mask, Some(TUN_NAME));
+        }
         // Skip loopback — we never added a host route for it
         if upstream_ip.octets()[0] != 127 {
             linux_route::delete_route(
@@ -1148,18 +1103,10 @@ fn remove_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) {
         // Remove TUN split routes (gateway = TUN gateway IP)
         if let Some(tun_if_idx) = win_route::find_if_index_by_ip(tun_ip) {
             let tun_gw_nbo = win_route::ip_to_nbo(tun_gw);
-            win_route::delete_route(
-                Ipv4Addr::new(0, 0, 0, 0),
-                Ipv4Addr::new(128, 0, 0, 0),
-                tun_gw_nbo,
-                tun_if_idx,
-            );
-            win_route::delete_route(
-                Ipv4Addr::new(128, 0, 0, 0),
-                Ipv4Addr::new(128, 0, 0, 0),
-                tun_gw_nbo,
-                tun_if_idx,
-            );
+            let split_mask = Ipv4Addr::new(128, 0, 0, 0);
+            for dest in [Ipv4Addr::new(0, 0, 0, 0), Ipv4Addr::new(128, 0, 0, 0)] {
+                win_route::delete_route(dest, split_mask, tun_gw_nbo, tun_if_idx);
+            }
         }
         // Remove upstream host route (skip loopback)
         if upstream_ip.octets()[0] != 127 {
