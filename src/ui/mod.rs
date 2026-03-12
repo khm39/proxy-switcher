@@ -1,6 +1,5 @@
 pub mod detail;
 pub mod proxy_list;
-pub mod sidebar;
 
 // ---------------------------------------------------------------------------
 // Modern color palette (dark theme)
@@ -17,27 +16,27 @@ pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(99, 102, 241);        
 pub const ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(129, 131, 248); // #8183f8
 pub const ACCENT_DIM: egui::Color32 = egui::Color32::from_rgb(67, 69, 170);     // #4345aa
 
-// Text
-pub const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(226, 232, 240);  // #e2e8f0
-pub const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(148, 163, 184);// #94a3b8
-pub const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);    // #64748b
+// Text — higher contrast for accessibility (WCAG AA on dark backgrounds)
+pub const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(240, 244, 248);  // #f0f4f8
+pub const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(176, 190, 206);// #b0bece
+pub const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(140, 155, 175);    // #8c9baf
 
-// Status colors
-pub const COLOR_IDLE: egui::Color32 = egui::Color32::from_rgb(100, 116, 139);   // #64748b
-pub const COLOR_TESTING: egui::Color32 = egui::Color32::from_rgb(250, 204, 21); // #facc15
-pub const COLOR_SUCCESS: egui::Color32 = egui::Color32::from_rgb(52, 211, 153); // #34d399
-pub const COLOR_FAILED: egui::Color32 = egui::Color32::from_rgb(251, 113, 133); // #fb7185
+// Status colors — brighter for readability on dark backgrounds
+pub const COLOR_IDLE: egui::Color32 = egui::Color32::from_rgb(140, 155, 175);   // #8c9baf
+pub const COLOR_TESTING: egui::Color32 = egui::Color32::from_rgb(253, 224, 71);  // #fde047
+pub const COLOR_SUCCESS: egui::Color32 = egui::Color32::from_rgb(74, 222, 170);  // #4adea a
+pub const COLOR_FAILED: egui::Color32 = egui::Color32::from_rgb(252, 141, 156);  // #fc8d9c
 
-// Badge colors
-pub const BADGE_HTTP: egui::Color32 = egui::Color32::from_rgb(56, 189, 248);    // #38bdf8
-pub const BADGE_SOCKS: egui::Color32 = egui::Color32::from_rgb(168, 85, 247);   // #a855f7
+// Badge colors — slightly brighter for contrast
+pub const BADGE_HTTP: egui::Color32 = egui::Color32::from_rgb(96, 205, 255);    // #60cdff
+pub const BADGE_SOCKS: egui::Color32 = egui::Color32::from_rgb(192, 120, 255);  // #c078ff
 
-// Border / separator
-pub const BORDER: egui::Color32 = egui::Color32::from_rgb(45, 50, 65);          // #2d3241
+// Border / separator — slightly lighter for visibility
+pub const BORDER: egui::Color32 = egui::Color32::from_rgb(55, 62, 80);          // #373e50
 
 // Input field background (shared by TextEdit, DragValue, ComboBox)
 pub const INPUT_BG: egui::Color32 = egui::Color32::from_rgb(20, 23, 32);        // #141720
-pub const INPUT_BORDER: egui::Color32 = egui::Color32::from_rgb(55, 60, 80);    // #373c50
+pub const INPUT_BORDER: egui::Color32 = egui::Color32::from_rgb(65, 72, 92);    // #41485c
 pub const INPUT_BORDER_FOCUS: egui::Color32 = egui::Color32::from_rgb(99, 102, 241); // same as ACCENT
 
 /// Apply modern dark theme to egui visuals.
@@ -155,4 +154,23 @@ pub fn badge_color(proxy_type: &str) -> egui::Color32 {
         "HTTP" | "HTTPS" => BADGE_HTTP,
         _ => BADGE_SOCKS,
     }
+}
+
+/// Render a colored type badge with padding (e.g. "SOCKS5", "HTTP").
+pub fn type_badge(ui: &mut egui::Ui, proxy_type: &str) {
+    let bg = badge_color(proxy_type);
+    // Use dark text on the badge for readability
+    let text_color = egui::Color32::from_rgb(15, 17, 23);
+    egui::Frame::none()
+        .fill(bg)
+        .rounding(egui::Rounding::same(4.0))
+        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(proxy_type)
+                    .size(10.0)
+                    .strong()
+                    .color(text_color),
+            );
+        });
 }

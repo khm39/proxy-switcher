@@ -9,7 +9,6 @@ pub struct AppState {
     pub rt: Arc<tokio::runtime::Runtime>,
 
     // Selection state
-    pub selected_profile_id: Option<String>,
     pub selected_proxy_id: Option<String>,
 
     // Detail panel
@@ -39,11 +38,9 @@ pub struct AppState {
 impl AppState {
     pub fn new(rt: Arc<tokio::runtime::Runtime>) -> Self {
         let data = crate::storage::load();
-        let selected_profile_id = data.active_profile_id.clone();
         Self {
             data,
             rt,
-            selected_profile_id,
             selected_proxy_id: None,
             detail_tab: DetailTab::Basic,
             show_password: false,
@@ -65,11 +62,8 @@ impl AppState {
                 TestStatus::Testing => {} // still running
                 _ => {
                     let pid = proxy_id.clone();
-                    for profile in &mut self.data.profiles {
-                        if let Some(proxy) = profile.proxies.iter_mut().find(|p| p.id == pid) {
-                            proxy.test_status = status;
-                            break;
-                        }
+                    if let Some(proxy) = self.data.proxies.iter_mut().find(|p| p.id == pid) {
+                        proxy.test_status = status;
                     }
                     self.pending_test = None;
                 }
@@ -78,7 +72,6 @@ impl AppState {
     }
 
     /// Start or restart the transparent proxy with the active proxy config.
-    /// If no active proxy, stops the proxy.
     pub fn apply_proxy(&mut self) {
         log::info!("apply_proxy() called");
 
@@ -88,11 +81,7 @@ impl AppState {
             handle.stop();
         }
 
-        let proxy = self
-            .data
-            .active_profile()
-            .and_then(|p| p.active_proxy())
-            .cloned();
+        let proxy = self.data.active_proxy().cloned();
 
         let Some(proxy) = proxy else {
             log::info!("No active proxy configured");
@@ -186,7 +175,6 @@ impl eframe::App for App {
                 .stroke(egui::Stroke::new(1.0, crate::ui::BORDER)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    // App title
                     ui.label(
                         egui::RichText::new("Proxy Manager")
                             .size(18.0)
@@ -204,11 +192,10 @@ impl eframe::App for App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let status = self.state.proxy_status.lock().unwrap();
                         if status.running {
-                            // Green pill for ON
                             let pill = egui::RichText::new(format!("  ON  {}  ", status.tun_addr))
                                 .size(11.0)
                                 .strong()
-                                .color(egui::Color32::from_rgb(6, 78, 59)); // dark green text
+                                .color(egui::Color32::from_rgb(6, 78, 59));
                             ui.label(pill.background_color(crate::ui::COLOR_SUCCESS));
 
                             ui.add_space(6.0);
@@ -234,7 +221,6 @@ impl eframe::App for App {
                     });
                 });
 
-                // Show save error if any
                 if let Some(err) = &self.state.save_error {
                     ui.add_space(4.0);
                     ui.label(
@@ -245,11 +231,10 @@ impl eframe::App for App {
                 }
             });
 
-        // Main area: 3-pane layout
+        // Main area: 2-pane layout (proxy list + detail)
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(crate::ui::BG_DARK))
             .show(ctx, |ui| {
-                crate::ui::sidebar::render(ui, &mut self.state);
                 crate::ui::proxy_list::render(ui, &mut self.state);
                 crate::ui::detail::render(ui, &mut self.state);
             });
@@ -261,7 +246,6 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Stop the transparent proxy
         if let Some(handle) = self.state.proxy_handle.take() {
             handle.stop();
         }

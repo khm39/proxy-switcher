@@ -18,7 +18,6 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                 .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
         )
         .show_inside(ui, |ui| {
-            let profile_id = state.selected_profile_id.clone();
             let proxy_id = state.selected_proxy_id.clone();
 
             let Some(proxy_id) = proxy_id else {
@@ -33,15 +32,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                 return;
             };
 
-            // Find the proxy
-            let proxy = profile_id.as_ref().and_then(|pid| {
-                state
-                    .data
-                    .profiles
-                    .iter_mut()
-                    .find(|p| &p.id == pid)
-                    .and_then(|profile| profile.proxies.iter_mut().find(|p| p.id == proxy_id))
-            });
+            let proxy = state.data.proxies.iter_mut().find(|p| p.id == proxy_id);
 
             let Some(proxy) = proxy else {
                 ui.label(
@@ -54,14 +45,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
             // Header: type badge + name + status
             ui.horizontal(|ui| {
-                let badge_color = super::badge_color(&proxy.proxy_type.to_string());
-                ui.label(
-                    RichText::new(proxy.proxy_type.to_string())
-                        .size(11.0)
-                        .strong()
-                        .color(badge_color)
-                        .background_color(badge_color.linear_multiply(0.15)),
-                );
+                super::type_badge(ui, &proxy.proxy_type.to_string());
                 ui.label(
                     RichText::new(&proxy.name)
                         .size(20.0)
@@ -114,7 +98,6 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                 }
             });
 
-            // Accent underline
             ui.scope(|ui| {
                 ui.visuals_mut().widgets.noninteractive.bg_stroke =
                     egui::Stroke::new(1.0, super::BORDER);
@@ -125,39 +108,29 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
             match state.detail_tab {
                 DetailTab::Basic => {
-                    render_basic_tab(ui, state, &proxy_id, &profile_id);
+                    render_basic_tab(ui, state, &proxy_id);
                 }
                 DetailTab::PortFilter => {
-                    render_port_filter_tab(ui, state, &proxy_id, &profile_id);
+                    render_port_filter_tab(ui, state, &proxy_id);
                 }
                 DetailTab::Note => {
-                    render_note_tab(ui, state, &proxy_id, &profile_id);
+                    render_note_tab(ui, state, &proxy_id);
                 }
             }
         });
 }
 
-fn render_basic_tab(
-    ui: &mut Ui,
-    state: &mut AppState,
-    proxy_id: &str,
-    profile_id: &Option<String>,
-) {
-    // Re-find proxy for this tab
-    let proxy = profile_id.as_ref().and_then(|pid| {
-        state
-            .data
-            .profiles
-            .iter_mut()
-            .find(|p| &p.id == pid)
-            .and_then(|profile| profile.proxies.iter_mut().find(|p| p.id == proxy_id))
-    });
+fn find_proxy_mut<'a>(state: &'a mut AppState, proxy_id: &str) -> Option<&'a mut crate::models::Proxy> {
+    state.data.proxies.iter_mut().find(|p| p.id == proxy_id)
+}
 
-    let Some(proxy) = proxy else {
+fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
+    let mut show_password = state.show_password;
+
+    let Some(proxy) = find_proxy_mut(state, proxy_id) else {
         return;
     };
 
-    // Form in a card
     egui::Frame::none()
         .fill(super::BG_DARK)
         .rounding(egui::Rounding::same(8.0))
@@ -169,7 +142,6 @@ fn render_basic_tab(
                     .num_columns(2)
                     .spacing([16.0, 12.0])
                     .show(ui, |ui| {
-                        // Name
                         ui.label(
                             RichText::new("Proxy Name")
                                 .size(12.0)
@@ -182,7 +154,6 @@ fn render_basic_tab(
                         );
                         ui.end_row();
 
-                        // Type
                         ui.label(
                             RichText::new("Type")
                                 .size(12.0)
@@ -206,7 +177,6 @@ fn render_basic_tab(
                             });
                         ui.end_row();
 
-                        // Host
                         ui.label(
                             RichText::new("Host")
                                 .size(12.0)
@@ -220,7 +190,6 @@ fn render_basic_tab(
                         );
                         ui.end_row();
 
-                        // Port
                         ui.label(
                             RichText::new("Port")
                                 .size(12.0)
@@ -244,7 +213,6 @@ fn render_basic_tab(
                         }
                         ui.end_row();
 
-                        // Username
                         ui.label(
                             RichText::new("Username")
                                 .size(12.0)
@@ -258,14 +226,13 @@ fn render_basic_tab(
                         );
                         ui.end_row();
 
-                        // Password
                         ui.label(
                             RichText::new("Password")
                                 .size(12.0)
                                 .color(super::TEXT_SECONDARY),
                         );
                         ui.horizontal(|ui| {
-                            if state.show_password {
+                            if show_password {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut proxy.password)
                                         .desired_width(200.0)
@@ -285,7 +252,7 @@ fn render_basic_tab(
                                 }
                             }
                             let toggle_text =
-                                if state.show_password { "Hide" } else { "Show" };
+                                if show_password { "Hide" } else { "Show" };
                             if ui
                                 .button(
                                     RichText::new(toggle_text)
@@ -294,7 +261,7 @@ fn render_basic_tab(
                                 )
                                 .clicked()
                             {
-                                state.show_password = !state.show_password;
+                                show_password = !show_password;
                             }
                         });
                         ui.end_row();
@@ -302,38 +269,32 @@ fn render_basic_tab(
             });
         });
 
+    state.show_password = show_password;
+
     ui.add_space(16.0);
 
     // Action buttons
-    let proxy_url = {
-        // Re-find proxy to get url
-        let proxy = profile_id.as_ref().and_then(|pid| {
-            state
-                .data
-                .profiles
-                .iter()
-                .find(|p| &p.id == pid)
-                .and_then(|profile| profile.proxies.iter().find(|p| p.id == proxy_id))
-        });
-        proxy.map(|p| p.url()).unwrap_or_default()
-    };
+    let proxy_url = state
+        .data
+        .proxies
+        .iter()
+        .find(|p| p.id == proxy_id)
+        .map(|p| p.url())
+        .unwrap_or_default();
 
-    let testing = profile_id.as_ref().and_then(|pid| {
-        state
-            .data
-            .profiles
-            .iter()
-            .find(|p| &p.id == pid)
-            .and_then(|profile| profile.proxies.iter().find(|p| p.id == proxy_id))
-            .map(|p| matches!(p.test_status, TestStatus::Testing))
-    }).unwrap_or(false);
+    let testing = state
+        .data
+        .proxies
+        .iter()
+        .find(|p| p.id == proxy_id)
+        .map(|p| matches!(p.test_status, TestStatus::Testing))
+        .unwrap_or(false);
 
     let btn_size = egui::vec2(130.0, 30.0);
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
 
-        // Test connection button with animated spinner
         if testing {
             let dots = animated_dots(ui);
             let label = format!("Testing{dots}");
@@ -347,7 +308,6 @@ fn render_basic_tab(
                     ),
                 )
             });
-            // Spinner circle next to button
             let spinner_rect = egui::Rect::from_min_size(
                 btn.response.rect.right_top() + egui::vec2(6.0, 8.0),
                 egui::vec2(14.0, 14.0),
@@ -366,7 +326,6 @@ fn render_basic_tab(
             }
         }
 
-        // Set as active button
         let active_btn = ui.add_sized(
             btn_size,
             egui::Button::new(
@@ -376,16 +335,11 @@ fn render_basic_tab(
             ),
         );
         if active_btn.clicked() {
-            if let Some(profile) = profile_id.as_ref().and_then(|pid| {
-                state.data.profiles.iter_mut().find(|p| &p.id == pid)
-            }) {
-                profile.active_proxy_id = Some(proxy_id.to_string());
-                state.needs_save = true;
-                state.apply_proxy();
-            }
+            state.data.active_proxy_id = Some(proxy_id.to_string());
+            state.needs_save = true;
+            state.apply_proxy();
         }
 
-        // Save button
         let save_btn = ui.add_sized(
             btn_size,
             egui::Button::new(RichText::new("Save").size(12.0)),
@@ -396,21 +350,10 @@ fn render_basic_tab(
     });
 }
 
-fn render_port_filter_tab(
-    ui: &mut Ui,
-    state: &mut AppState,
-    proxy_id: &str,
-    profile_id: &Option<String>,
-) {
-    let proxy = profile_id.as_ref().and_then(|pid| {
-        state
-            .data
-            .profiles
-            .iter_mut()
-            .find(|p| &p.id == pid)
-            .and_then(|profile| profile.proxies.iter_mut().find(|p| p.id == proxy_id))
-    });
-    let Some(proxy) = proxy else { return };
+fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
+    let Some(proxy) = find_proxy_mut(state, proxy_id) else {
+        return;
+    };
 
     egui::Frame::none()
         .fill(super::BG_DARK)
@@ -446,7 +389,6 @@ fn render_port_filter_tab(
                     }
 
                     ui.add_space(12.0);
-
                     ui.label(
                         RichText::new("Quick select")
                             .size(11.0)
@@ -503,29 +445,16 @@ fn render_port_filter_tab(
         });
 
     ui.add_space(12.0);
-    if ui
-        .button(RichText::new("Save").size(12.0))
-        .clicked()
-    {
+    if ui.button(RichText::new("Save").size(12.0)).clicked() {
         state.needs_save = true;
     }
 }
 
-fn render_note_tab(
-    ui: &mut Ui,
-    state: &mut AppState,
-    proxy_id: &str,
-    profile_id: &Option<String>,
-) {
-    let proxy = profile_id.as_ref().and_then(|pid| {
-        state
-            .data
-            .profiles
-            .iter_mut()
-            .find(|p| &p.id == pid)
-            .and_then(|profile| profile.proxies.iter_mut().find(|p| p.id == proxy_id))
-    });
-    let Some(proxy) = proxy else { return };
+fn render_note_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
+    let Some(proxy) = find_proxy_mut(state, proxy_id) else {
+        return;
+    };
+
     ui.label(
         RichText::new("Notes")
             .size(12.0)
@@ -551,10 +480,7 @@ fn render_note_tab(
         });
 
     ui.add_space(12.0);
-    if ui
-        .button(RichText::new("Save").size(12.0))
-        .clicked()
-    {
+    if ui.button(RichText::new("Save").size(12.0)).clicked() {
         state.needs_save = true;
     }
 }
@@ -563,7 +489,6 @@ fn render_note_tab(
 // Animated testing indicator helpers
 // ---------------------------------------------------------------------------
 
-/// Return an animated dots string ("", ".", "..", "...") cycling every 400ms.
 fn animated_dots(ui: &Ui) -> &'static str {
     let phase = (ui.input(|i| i.time) * 2.5) as usize % 4;
     match phase {
@@ -574,7 +499,6 @@ fn animated_dots(ui: &Ui) -> &'static str {
     }
 }
 
-/// Draw a small spinning arc indicator.
 fn draw_spinner(ui: &mut Ui, rect: egui::Rect) {
     let time = ui.input(|i| i.time);
     let center = rect.center();
