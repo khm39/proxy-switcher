@@ -80,28 +80,29 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
                 for (tab, label) in tabs {
                     let is_active = state.detail_tab == tab;
-                    let text = if is_active {
-                        RichText::new(label)
-                            .size(14.0)
-                            .strong()
-                            .color(super::ACCENT)
+                    let (bg, stroke, text_color) = if is_active {
+                        (super::BG_ELEVATED, egui::Stroke::new(1.5, super::ACCENT), super::ACCENT)
                     } else {
-                        RichText::new(label)
-                            .size(14.0)
-                            .color(super::TEXT_SECONDARY)
+                        (super::BG_DARK, egui::Stroke::new(1.0, super::BORDER), super::TEXT_SECONDARY)
                     };
 
-                    if ui.selectable_label(is_active, text).clicked() {
+                    let resp = egui::Frame::none()
+                        .fill(bg)
+                        .stroke(stroke)
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                        .show(ui, |ui| {
+                            let text = if is_active {
+                                RichText::new(label).size(13.0).strong().color(text_color)
+                            } else {
+                                RichText::new(label).size(13.0).color(text_color)
+                            };
+                            ui.label(text);
+                        });
+                    if resp.response.interact(egui::Sense::click()).clicked() {
                         state.detail_tab = tab;
                     }
-                    ui.add_space(4.0);
                 }
-            });
-
-            ui.scope(|ui| {
-                ui.visuals_mut().widgets.noninteractive.bg_stroke =
-                    egui::Stroke::new(1.0, super::BORDER);
-                ui.separator();
             });
 
             ui.add_space(8.0);
