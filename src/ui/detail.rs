@@ -307,25 +307,16 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
         if testing {
             let dots = animated_dots(ui);
             let label = format!("Testing{dots}");
-            let btn = ui.add_enabled_ui(false, |ui| {
-                ui.button(
-                    RichText::new(label)
-                        .size(13.0)
-                        .color(super::COLOR_TESTING),
-                )
-            });
-            let spinner_rect = egui::Rect::from_min_size(
-                btn.response.rect.right_top() + egui::vec2(4.0, 6.0),
-                egui::vec2(14.0, 14.0),
-            );
-            draw_spinner(ui, spinner_rect);
+            ui.add_enabled(false, egui::Button::new(
+                RichText::new(label)
+                    .size(13.0)
+                    .color(super::COLOR_TESTING),
+            ));
             ui.ctx().request_repaint();
-        } else {
-            if ui.button(RichText::new("Test Connection").size(13.0)).clicked() {
-                let status = Arc::new(Mutex::new(TestStatus::Testing));
-                state.pending_test = Some((proxy_id.to_string(), status.clone()));
-                crate::tester::run_test(&state.rt, proxy_url, status, ui.ctx().clone());
-            }
+        } else if ui.button(RichText::new("Test Connection").size(13.0)).clicked() {
+            let status = Arc::new(Mutex::new(TestStatus::Testing));
+            state.pending_test = Some((proxy_id.to_string(), status.clone()));
+            crate::tester::run_test(&state.rt, proxy_url, status, ui.ctx().clone());
         }
 
         if ui.button(
@@ -512,27 +503,3 @@ fn animated_dots(ui: &Ui) -> &'static str {
     }
 }
 
-fn draw_spinner(ui: &mut Ui, rect: egui::Rect) {
-    let time = ui.input(|i| i.time);
-    let center = rect.center();
-    let radius = rect.width() / 2.0;
-    let start_angle = (time * 4.0) as f32;
-    let arc_len = std::f32::consts::PI * 1.2;
-
-    let n_points = 20;
-    let points: Vec<egui::Pos2> = (0..=n_points)
-        .map(|i| {
-            let t = i as f32 / n_points as f32;
-            let angle = start_angle + t * arc_len;
-            egui::pos2(
-                center.x + radius * angle.cos(),
-                center.y + radius * angle.sin(),
-            )
-        })
-        .collect();
-
-    ui.painter().add(egui::Shape::line(
-        points,
-        egui::Stroke::new(2.0, super::COLOR_TESTING),
-    ));
-}
