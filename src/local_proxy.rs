@@ -577,17 +577,14 @@ mod win_route {
         metric: u32,
         on_link: bool,
     ) -> Result<(), String> {
-        let (fwd_type, fwd_hop) = if on_link {
-            // On-link / direct: packets go straight to the interface, no gateway
-            (MIB_IPROUTE_TYPE_DIRECT, ip_to_nbo(Ipv4Addr::UNSPECIFIED))
-        } else {
-            (MIB_IPROUTE_TYPE_INDIRECT, gateway_nbo)
-        };
+        // On-link (DIRECT): next hop = interface's own IP, type = 3
+        // Indirect: next hop = gateway IP, type = 4
+        let fwd_type = if on_link { MIB_IPROUTE_TYPE_DIRECT } else { MIB_IPROUTE_TYPE_INDIRECT };
         let row = MIB_IPFORWARDROW {
             dwForwardDest: ip_to_nbo(dest),
             dwForwardMask: ip_to_nbo(mask),
             dwForwardPolicy: 0,
-            dwForwardNextHop: fwd_hop,
+            dwForwardNextHop: gateway_nbo,
             dwForwardIfIndex: if_index,
             dwForwardType: fwd_type,
             dwForwardProto: MIB_IPPROTO_NETMGMT,
@@ -904,15 +901,8 @@ fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
         // Match by gateway=TUN_IP (old style) or by known split-route patterns on TUN interface
         if let Ok(stale_snap) = win_route::RouteTable::read() {
             let tun_nbo = win_route::ip_to_nbo(tun_ip);
-            // Also check if we already know the TUN interface index
-            let stale_tun_if = win_route::find_if_index_by_ip(tun_ip);
             for entry in stale_snap.entries() {
-                let is_tun_gw = entry.dwForwardNextHop == tun_nbo;
-                let is_tun_onlink = stale_tun_if.map_or(false, |idx| {
-                    entry.dwForwardIfIndex == idx
-                    && entry.dwForwardNextHop == 0
-                });
-                if is_tun_gw || is_tun_onlink {
+                if entry.dwForwardNextHop == tun_nbo {
                     let dest = win_route::nbo_to_ip(entry.dwForwardDest);
                     let mask = win_route::nbo_to_ip(entry.dwForwardMask);
                     log::info!("Cleaning stale TUN route: {}/{} if={}", dest, mask, entry.dwForwardIfIndex);
@@ -967,23 +957,24 @@ fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
         }
 
         // Step 4: Split default routes via TUN (0.0.0.0/1 + 128.0.0.0/1)
-        // Use on-link (DIRECT) routing: packets go straight to the TUN interface.
-        // This avoids error 160 when TUN IP overlaps with physical NIC subnet.
+        // On-link (DIRECT): next hop = TUN interface's own IP.
+        // Windows requires a valid next hop even for on-link routes.
+        let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
         win_route::create_route(
             Ipv4Addr::new(0, 0, 0, 0),
             Ipv4Addr::new(128, 0, 0, 0),
-            0, // unused for on-link
+            tun_gw_nbo,
             tun_if_idx,
             1,
-            true, // on-link
+            true, // on-link (DIRECT)
         )?;
         win_route::create_route(
             Ipv4Addr::new(128, 0, 0, 0),
             Ipv4Addr::new(128, 0, 0, 0),
-            0, // unused for on-link
+            tun_gw_nbo,
             tun_if_idx,
             1,
-            true, // on-link
+            true, // on-link (DIRECT)
         )?;
 
         // Step 5: Verify
@@ -1037,19 +1028,19 @@ fn remove_routes(upstream_host: &str, tun_addr: &str) {
     {
         let tun_ip: Ipv4Addr = tun_addr.parse().unwrap_or(Ipv4Addr::new(198, 18, 0, 1));
 
-        // Remove TUN split routes (on-link: gateway = 0.0.0.0)
+        // Remove TUN split routes (on-link: gateway = TUN IP)
         if let Some(tun_if_idx) = win_route::find_if_index_by_ip(tun_ip) {
-            let zero_gw = win_route::ip_to_nbo(Ipv4Addr::UNSPECIFIED);
+            let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
             win_route::delete_route(
                 Ipv4Addr::new(0, 0, 0, 0),
                 Ipv4Addr::new(128, 0, 0, 0),
-                zero_gw,
+                tun_gw_nbo,
                 tun_if_idx,
             );
             win_route::delete_route(
                 Ipv4Addr::new(128, 0, 0, 0),
                 Ipv4Addr::new(128, 0, 0, 0),
-                zero_gw,
+                tun_gw_nbo,
                 tun_if_idx,
             );
         }
