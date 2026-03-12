@@ -20,13 +20,13 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new("PROXIES")
-                        .size(10.0)
+                        .size(12.0)
                         .strong()
                         .color(super::TEXT_MUTED),
                 );
                 ui.label(
                     RichText::new(format!("{proxy_count}"))
-                        .size(10.0)
+                        .size(12.0)
                         .color(super::TEXT_MUTED)
                         .background_color(super::BG_ELEVATED),
                 );
@@ -60,7 +60,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                         ui.vertical_centered(|ui| {
                             ui.label(
                                 RichText::new("No proxies yet")
-                                    .size(12.0)
+                                    .size(14.0)
                                     .color(super::TEXT_MUTED),
                             );
                         });
@@ -94,12 +94,12 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                                     // Proxy name
                                     let name_text = if *is_active {
                                         RichText::new(name)
-                                            .size(13.0)
+                                            .size(14.0)
                                             .strong()
                                             .color(super::TEXT_PRIMARY)
                                     } else {
                                         RichText::new(name)
-                                            .size(13.0)
+                                            .size(14.0)
                                             .color(super::TEXT_PRIMARY)
                                     };
                                     ui.label(name_text);
@@ -112,7 +112,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                                                 .add(
                                                     egui::Button::new(
                                                         RichText::new("x")
-                                                            .size(11.0)
+                                                            .size(13.0)
                                                             .color(super::TEXT_MUTED),
                                                     )
                                                     .frame(false),
@@ -138,14 +138,14 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                                                 }
                                             };
                                             ui.label(
-                                                RichText::new("●").size(10.0).color(color),
+                                                RichText::new("●").size(12.0).color(color),
                                             )
                                             .on_hover_text(tip);
 
                                             if *is_active {
                                                 ui.label(
                                                     RichText::new("ACTIVE")
-                                                        .size(9.0)
+                                                        .size(11.0)
                                                         .strong()
                                                         .color(super::COLOR_SUCCESS),
                                                 );
@@ -184,7 +184,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
             // Add proxy button
             let btn = ui.add_sized(
                 [ui.available_width(), 30.0],
-                egui::Button::new(RichText::new("+ Add Proxy").size(12.0).color(super::ACCENT)),
+                egui::Button::new(RichText::new("+ Add Proxy").size(14.0).color(super::ACCENT)),
             );
             if btn.clicked() {
                 let new_proxy = Proxy::default();
@@ -205,7 +205,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
             ui.label(
                 RichText::new("TUN SETTINGS")
-                    .size(10.0)
+                    .size(12.0)
                     .strong()
                     .color(super::TEXT_MUTED),
             );
@@ -213,7 +213,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
             ui.label(
                 RichText::new("TUN IP")
-                    .size(11.0)
+                    .size(13.0)
                     .color(super::TEXT_SECONDARY),
             );
             super::input_field_scope(ui, |ui| {
@@ -229,7 +229,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
             });
             ui.label(
                 RichText::new("Restart proxy to apply")
-                    .size(10.0)
+                    .size(12.0)
                     .color(super::TEXT_MUTED),
             );
         });

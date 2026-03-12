@@ -177,7 +177,7 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("Proxy Manager")
-                            .size(18.0)
+                            .size(20.0)
                             .strong()
                             .color(crate::ui::TEXT_PRIMARY),
                     );
@@ -185,7 +185,7 @@ impl eframe::App for App {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new("v0.1")
-                            .size(11.0)
+                            .size(13.0)
                             .color(crate::ui::TEXT_MUTED),
                     );
 
@@ -193,7 +193,7 @@ impl eframe::App for App {
                         let status = self.state.proxy_status.lock().unwrap();
                         if status.running {
                             let pill = egui::RichText::new(format!("  ON  {}  ", status.tun_addr))
-                                .size(11.0)
+                                .size(13.0)
                                 .strong()
                                 .color(egui::Color32::from_rgb(18, 18, 18));
                             ui.label(pill.background_color(crate::ui::COLOR_SUCCESS));
@@ -201,12 +201,12 @@ impl eframe::App for App {
                             ui.add_space(6.0);
                             ui.label(
                                 egui::RichText::new(format!("{} conn", status.connections))
-                                    .size(11.0)
+                                    .size(13.0)
                                     .color(crate::ui::TEXT_MUTED),
                             );
                         } else {
                             let pill = egui::RichText::new("  OFF  ")
-                                .size(11.0)
+                                .size(13.0)
                                 .strong()
                                 .color(crate::ui::TEXT_MUTED);
                             ui.label(pill.background_color(crate::ui::BG_ELEVATED));
@@ -214,7 +214,7 @@ impl eframe::App for App {
                         if let Some(err) = &status.error {
                             ui.label(
                                 egui::RichText::new(err.as_str())
-                                    .size(11.0)
+                                    .size(13.0)
                                     .color(crate::ui::COLOR_FAILED),
                             );
                         }
@@ -225,7 +225,7 @@ impl eframe::App for App {
                     ui.add_space(4.0);
                     ui.label(
                         egui::RichText::new(format!("Save error: {err}"))
-                            .size(11.0)
+                            .size(13.0)
                             .color(crate::ui::COLOR_FAILED),
                     );
                 }

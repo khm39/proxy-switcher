@@ -25,7 +25,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                 ui.vertical_centered(|ui| {
                     ui.label(
                         RichText::new("Select a proxy to view details")
-                            .size(14.0)
+                            .size(16.0)
                             .color(super::TEXT_MUTED),
                     );
                 });
@@ -37,7 +37,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
             let Some(proxy) = proxy else {
                 ui.label(
                     RichText::new("Proxy not found")
-                        .size(13.0)
+                        .size(14.0)
                         .color(super::TEXT_MUTED),
                 );
                 return;
@@ -48,7 +48,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                 super::type_badge(ui, &proxy.proxy_type.to_string());
                 ui.label(
                     RichText::new(&proxy.name)
-                        .size(20.0)
+                        .size(22.0)
                         .strong()
                         .color(super::TEXT_PRIMARY),
                 );
@@ -62,7 +62,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                     };
                     ui.label(
                         RichText::new(format!("● {text}"))
-                            .size(12.0)
+                            .size(13.0)
                             .color(color),
                     );
                 });
@@ -82,12 +82,12 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                     let is_active = state.detail_tab == tab;
                     let text = if is_active {
                         RichText::new(label)
-                            .size(12.0)
+                            .size(14.0)
                             .strong()
                             .color(super::ACCENT)
                     } else {
                         RichText::new(label)
-                            .size(12.0)
+                            .size(14.0)
                             .color(super::TEXT_SECONDARY)
                     };
 
@@ -126,12 +126,12 @@ fn required_label(ui: &mut Ui, text: &str) {
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.label(
             RichText::new(text)
-                .size(12.0)
+                .size(13.0)
                 .color(super::TEXT_SECONDARY),
         );
         ui.label(
             RichText::new("*")
-                .size(12.0)
+                .size(13.0)
                 .color(super::COLOR_FAILED),
         );
     });
@@ -172,7 +172,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 egui::ComboBox::from_id_source("proxy_type_combo")
                     .selected_text(
                         RichText::new(proxy.proxy_type.to_string())
-                            .size(12.0)
+                            .size(13.0)
                             .color(super::TEXT_PRIMARY),
                     )
                     .width(field_width)
@@ -220,7 +220,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 // Username (optional)
                 ui.label(
                     RichText::new("Username")
-                        .size(12.0)
+                        .size(13.0)
                         .color(super::TEXT_SECONDARY),
                 );
                 ui.add(
@@ -234,7 +234,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 // Password (optional)
                 ui.label(
                     RichText::new("Password")
-                        .size(12.0)
+                        .size(13.0)
                         .color(super::TEXT_SECONDARY),
                 );
                 ui.horizontal(|ui| {
@@ -264,7 +264,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                     if ui
                         .button(
                             RichText::new(toggle_text)
-                                .size(11.0)
+                                .size(13.0)
                                 .color(super::ACCENT),
                         )
                         .clicked()
@@ -309,7 +309,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                     btn_size,
                     egui::Button::new(
                         RichText::new(label)
-                            .size(12.0)
+                            .size(13.0)
                             .color(super::COLOR_TESTING),
                     ),
                 )
@@ -323,7 +323,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
         } else {
             let test_btn = ui.add_sized(
                 btn_size,
-                egui::Button::new(RichText::new("Test Connection").size(12.0)),
+                egui::Button::new(RichText::new("Test Connection").size(13.0)),
             );
             if test_btn.clicked() {
                 let status = Arc::new(Mutex::new(TestStatus::Testing));
@@ -336,7 +336,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
             btn_size,
             egui::Button::new(
                 RichText::new("Set as Active")
-                    .size(12.0)
+                    .size(13.0)
                     .color(super::ACCENT),
             ),
         );
@@ -348,7 +348,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
 
         let save_btn = ui.add_sized(
             btn_size,
-            egui::Button::new(RichText::new("Save").size(12.0)),
+            egui::Button::new(RichText::new("Save").size(13.0)),
         );
         if save_btn.clicked() {
             state.needs_save = true;
@@ -360,7 +360,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 btn_size,
                 egui::Button::new(
                     RichText::new("Delete")
-                        .size(12.0)
+                        .size(13.0)
                         .color(super::COLOR_FAILED),
                 ),
             );
@@ -399,7 +399,7 @@ fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 ui.checkbox(
                     &mut pf.enabled,
                     RichText::new("Enable Port Filter")
-                        .size(13.0)
+                        .size(14.0)
                         .color(super::TEXT_PRIMARY),
                 );
                 ui.add_space(8.0);
@@ -407,7 +407,7 @@ fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 if pf.enabled {
                     ui.label(
                         RichText::new("Allowed ports (comma-separated)")
-                            .size(12.0)
+                            .size(13.0)
                             .color(super::TEXT_SECONDARY),
                     );
                     let resp = ui.add(
@@ -423,7 +423,7 @@ fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new("Quick select")
-                            .size(11.0)
+                            .size(13.0)
                             .color(super::TEXT_MUTED),
                     );
                     ui.add_space(4.0);
@@ -438,10 +438,10 @@ fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                         for (port, label) in quick_ports {
                             let active = pf.ports.contains(&port);
                             let text = if active {
-                                RichText::new(label).size(11.0).color(super::ACCENT)
+                                RichText::new(label).size(13.0).color(super::ACCENT)
                             } else {
                                 RichText::new(label)
-                                    .size(11.0)
+                                    .size(13.0)
                                     .color(super::TEXT_SECONDARY)
                             };
                             if ui.selectable_label(active, text).clicked() {
@@ -454,7 +454,7 @@ fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                     if pf.ports.is_empty() {
                         ui.label(
                             RichText::new("All ports allowed (no filter)")
-                                .size(12.0)
+                                .size(13.0)
                                 .color(super::TEXT_MUTED),
                         );
                     } else {
@@ -462,14 +462,14 @@ fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                             pf.ports.iter().map(|p| p.to_string()).collect();
                         ui.label(
                             RichText::new(format!("Allowed: {}", ports_str.join(", ")))
-                                .size(12.0)
+                                .size(13.0)
                                 .color(super::COLOR_SUCCESS),
                         );
                     }
                 } else {
                     ui.label(
                         RichText::new("Port filter disabled - all ports go through proxy")
-                            .size(12.0)
+                            .size(13.0)
                             .color(super::TEXT_MUTED),
                     );
                 }
@@ -477,7 +477,7 @@ fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
         });
 
     ui.add_space(12.0);
-    if ui.button(RichText::new("Save").size(12.0)).clicked() {
+    if ui.button(RichText::new("Save").size(13.0)).clicked() {
         state.needs_save = true;
     }
 }
@@ -489,7 +489,7 @@ fn render_note_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
 
     ui.label(
         RichText::new("Notes")
-            .size(12.0)
+            .size(13.0)
             .color(super::TEXT_SECONDARY),
     );
     ui.add_space(4.0);
@@ -512,7 +512,7 @@ fn render_note_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
         });
 
     ui.add_space(12.0);
-    if ui.button(RichText::new("Save").size(12.0)).clicked() {
+    if ui.button(RichText::new("Save").size(13.0)).clicked() {
         state.needs_save = true;
     }
 }

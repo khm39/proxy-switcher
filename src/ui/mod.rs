@@ -119,10 +119,20 @@ pub fn apply_theme(ctx: &egui::Context) {
     style.spacing.window_margin = egui::Margin::same(12.0);
     style.spacing.indent = 16.0;
     // Consistent interactive widget sizing
-    style.spacing.interact_size = egui::vec2(40.0, 24.0);
-    style.spacing.icon_width = 16.0;
-    style.spacing.icon_width_inner = 10.0;
+    style.spacing.interact_size = egui::vec2(40.0, 28.0);
+    style.spacing.icon_width = 18.0;
+    style.spacing.icon_width_inner = 12.0;
     style.spacing.icon_spacing = 6.0;
+
+    // Base font sizes — use OS standard sizing
+    use egui::TextStyle;
+    use egui::FontId;
+    style.text_styles.insert(TextStyle::Small, FontId::proportional(13.0));
+    style.text_styles.insert(TextStyle::Body, FontId::proportional(15.0));
+    style.text_styles.insert(TextStyle::Monospace, FontId::monospace(14.0));
+    style.text_styles.insert(TextStyle::Button, FontId::proportional(15.0));
+    style.text_styles.insert(TextStyle::Heading, FontId::proportional(22.0));
+
     ctx.set_style(style);
 }
 
@@ -168,7 +178,7 @@ pub fn type_badge(ui: &mut egui::Ui, proxy_type: &str) {
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(proxy_type)
-                    .size(10.0)
+                    .size(11.0)
                     .strong()
                     .color(text_color),
             );
