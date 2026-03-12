@@ -333,58 +333,107 @@ fn log_dll_arch(path: &str) {
 // Route management
 // ---------------------------------------------------------------------------
 
+fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
+    use std::process::Command;
+    log::info!("  exec: {} {}", program, args.join(" "));
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{} failed to start: {e}", program))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !stdout.trim().is_empty() {
+        log::info!("  stdout: {}", stdout.trim());
+    }
+    if !stderr.trim().is_empty() {
+        log::warn!("  stderr: {}", stderr.trim());
+    }
+    if !output.status.success() {
+        log::warn!("  exit code: {:?}", output.status.code());
+    }
+    Ok(stdout)
+}
+
 fn add_routes(upstream_host: &str) -> Result<(), String> {
     log::info!("Adding routes (upstream_host={})", upstream_host);
 
     #[cfg(target_os = "linux")]
     {
-        use std::process::Command;
-        let output = Command::new("ip")
-            .args(["route", "show", "default"])
-            .output()
-            .map_err(|e| format!("ip route show: {e}"))?;
-        let default_route = String::from_utf8_lossy(&output.stdout);
-        if let Some(gw_line) = default_route.lines().next() {
+        // Step 1: Find the original default gateway FIRST
+        let output = run_cmd("ip", &["route", "show", "default"])?;
+        let mut original_gw: Option<String> = None;
+        let mut original_dev: Option<String> = None;
+        if let Some(gw_line) = output.lines().next() {
             let parts: Vec<&str> = gw_line.split_whitespace().collect();
             if let (Some("via"), Some(gw), Some("dev"), Some(dev)) =
                 (parts.get(1).copied(), parts.get(2).copied(), parts.get(3).copied(), parts.get(4).copied())
             {
-                log::info!("Original gateway: {} via {}", gw, dev);
-                let _ = Command::new("ip")
-                    .args(["route", "add", upstream_host, "via", gw, "dev", dev])
-                    .output();
+                log::info!("Original gateway: {} via dev {}", gw, dev);
+                original_gw = Some(gw.to_string());
+                original_dev = Some(dev.to_string());
             }
         }
-        let _ = Command::new("ip")
-            .args(["route", "add", "default", "dev", TUN_NAME, "metric", "10"])
-            .output();
+
+        // Step 2: Add specific route for upstream proxy host via original gateway
+        // This MUST be done BEFORE adding the default TUN route to prevent routing loop
+        if let (Some(gw), Some(dev)) = (&original_gw, &original_dev) {
+            log::info!("Adding host route for upstream proxy {} via {} dev {}", upstream_host, gw, dev);
+            let _ = run_cmd("ip", &["route", "add", upstream_host, "via", gw, "dev", dev]);
+        } else {
+            log::warn!("No original gateway found! Upstream proxy traffic may loop through TUN.");
+        }
+
+        // Step 3: Add default route through TUN with low metric
+        log::info!("Adding default route via TUN device {}", TUN_NAME);
+        let _ = run_cmd("ip", &["route", "add", "default", "dev", TUN_NAME, "metric", "1"]);
+
+        // Step 4: Verify routing
+        let _ = run_cmd("ip", &["route", "show"]);
+
         Ok(())
     }
 
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
-        let _ = Command::new("route")
-            .args(["add", "0.0.0.0", "mask", "0.0.0.0", TUN_ADDR, "metric", "10"])
-            .output();
-        let output = Command::new("route")
-            .args(["print", "0.0.0.0"])
-            .output()
-            .map_err(|e| format!("route print: {e}"))?;
-        let route_table = String::from_utf8_lossy(&output.stdout);
+        // Step 1: Read existing route table to find original default gateway FIRST
+        log::info!("Reading existing route table...");
+        let route_table = run_cmd("route", &["print", "0.0.0.0"])?;
+        let mut original_gw: Option<String> = None;
         for line in route_table.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
+            // Windows route table: Network Destination  Netmask  Gateway  Interface  Metric
             if parts.first() == Some(&"0.0.0.0") && parts.get(1) == Some(&"0.0.0.0") {
                 if let Some(gw) = parts.get(2) {
-                    if *gw != TUN_ADDR {
-                        let _ = Command::new("route")
-                            .args(["add", upstream_host, "mask", "255.255.255.255", gw])
-                            .output();
+                    if *gw != TUN_ADDR && *gw != "On-link" {
+                        log::info!("Found original gateway: {}", gw);
+                        original_gw = Some(gw.to_string());
                         break;
                     }
                 }
             }
         }
+
+        // Step 2: Add specific route for upstream proxy host via original gateway
+        // This MUST be done BEFORE the default TUN route to prevent routing loop
+        if let Some(gw) = &original_gw {
+            log::info!("Adding host route for upstream proxy {} via {}", upstream_host, gw);
+            let _ = run_cmd("route", &["add", upstream_host, "mask", "255.255.255.255", gw, "metric", "1"]);
+        } else {
+            log::warn!("No original gateway found! Upstream proxy traffic may loop through TUN.");
+        }
+
+        // Step 3: Add default route via TUN with very low metric (1) to override existing routes
+        // Use two /1 routes (0.0.0.0/1 and 128.0.0.0/1) instead of a single 0.0.0.0/0 route.
+        // This is more reliable because it's more specific than any existing 0.0.0.0/0 default
+        // route and will always win in the routing table regardless of metric.
+        log::info!("Adding split default routes via TUN (0.0.0.0/1 + 128.0.0.0/1)");
+        let _ = run_cmd("route", &["add", "0.0.0.0", "mask", "128.0.0.0", TUN_ADDR, "metric", "1"]);
+        let _ = run_cmd("route", &["add", "128.0.0.0", "mask", "128.0.0.0", TUN_ADDR, "metric", "1"]);
+
+        // Step 4: Verify routing
+        log::info!("Verifying route table after changes:");
+        let _ = run_cmd("route", &["print", "0.0.0.0"]);
+
         Ok(())
     }
 
@@ -396,15 +445,16 @@ fn remove_routes(upstream_host: &str) {
     log::info!("Removing routes");
     #[cfg(target_os = "linux")]
     {
-        use std::process::Command;
-        let _ = Command::new("ip").args(["route", "del", "default", "dev", TUN_NAME]).output();
-        let _ = Command::new("ip").args(["route", "del", upstream_host]).output();
+        let _ = run_cmd("ip", &["route", "del", "default", "dev", TUN_NAME]);
+        let _ = run_cmd("ip", &["route", "del", upstream_host]);
     }
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
-        let _ = Command::new("route").args(["delete", "0.0.0.0", "mask", "0.0.0.0", TUN_ADDR]).output();
-        let _ = Command::new("route").args(["delete", upstream_host]).output();
+        // Remove the split /1 routes
+        let _ = run_cmd("route", &["delete", "0.0.0.0", "mask", "128.0.0.0", TUN_ADDR]);
+        let _ = run_cmd("route", &["delete", "128.0.0.0", "mask", "128.0.0.0", TUN_ADDR]);
+        // Remove upstream host route
+        let _ = run_cmd("route", &["delete", upstream_host]);
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     { let _ = upstream_host; }
@@ -586,6 +636,10 @@ async fn proxy_loop(
     // Track ports that currently have a LISTEN socket (to avoid duplicates)
     let mut listening_ports: HashSet<u16> = HashSet::new();
     let mut buf = vec![0u8; 65535];
+    let mut pkt_count: u64 = 0;
+    let mut tcp_pkt_count: u64 = 0;
+    let mut syn_count: u64 = 0;
+    let mut last_stats = std::time::Instant::now();
 
     log::info!("Proxy loop started, waiting for traffic...");
 
@@ -594,6 +648,15 @@ async fn proxy_loop(
         if shutdown.try_recv().is_ok() {
             log::info!("Shutdown signal received");
             break;
+        }
+
+        // Periodic stats logging
+        if last_stats.elapsed() >= std::time::Duration::from_secs(10) {
+            log::info!(
+                "Stats: pkts_from_tun={}, tcp_pkts={}, syns={}, active_conns={}",
+                pkt_count, tcp_pkt_count, syn_count, relays.len()
+            );
+            last_stats = std::time::Instant::now();
         }
 
         // 1. Read packet from TUN (with short timeout to keep loop responsive)
@@ -605,11 +668,18 @@ async fn proxy_loop(
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {
+                pkt_count += 1;
                 let pkt = &buf[..n];
 
                 // Parse TCP packet to detect new connections (SYN)
                 if let Some((_src, dst, is_syn)) = parse_tcp_packet(pkt) {
+                    tcp_pkt_count += 1;
                     let dst_port = dst.port();
+
+                    if is_syn {
+                        syn_count += 1;
+                        log::info!("SYN detected: -> {} (port {}), listening_ports={:?}", dst, dst_port, listening_ports);
+                    }
 
                     if is_syn && !listening_ports.contains(&dst_port) {
                         // Create a new smoltcp TCP socket listening on this port.
