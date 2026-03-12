@@ -863,14 +863,45 @@ fn add_routes(upstream_host: &str) -> Result<(), String> {
     {
         let tun_ip: Ipv4Addr = TUN_ADDR.parse().unwrap();
 
-        // Step 1: Read route table via GetIpForwardTable
+        // Step 0: Clean up stale TUN routes from previous runs
+        // These have gw=10.0.85.1 but wrong interface index (from old command-based routing)
+        if let Ok(stale_snap) = win_route::RouteTable::read() {
+            let tun_nbo = win_route::ip_to_nbo(tun_ip);
+            for entry in stale_snap.entries() {
+                if entry.dwForwardNextHop == tun_nbo {
+                    let dest = win_route::nbo_to_ip(entry.dwForwardDest);
+                    let mask = win_route::nbo_to_ip(entry.dwForwardMask);
+                    log::info!("Cleaning stale TUN route: {}/{} if={}", dest, mask, entry.dwForwardIfIndex);
+                    win_route::delete_route(dest, mask, entry.dwForwardNextHop, entry.dwForwardIfIndex);
+                }
+            }
+        }
+
+        // Step 1: Read route table via GetIpForwardTable (after cleanup)
         let snapshot = win_route::RouteTable::read()?;
         snapshot.log_table();
 
         // Step 2: Find original gateway & TUN interface index (via GetIpAddrTable)
+        // The TUN device may need time to register its IP after creation.
+        // Retry up to 3 seconds with 200ms intervals.
         let original_gw = snapshot.find_original_default_gw(tun_ip);
-        let tun_if_idx = win_route::find_if_index_by_ip(tun_ip)
-            .ok_or_else(|| "Cannot find TUN interface in IP address table".to_string())?;
+        let mut tun_if_idx = None;
+        for attempt in 0..15 {
+            tun_if_idx = win_route::find_if_index_by_ip(tun_ip);
+            if tun_if_idx.is_some() {
+                break;
+            }
+            if attempt < 14 {
+                log::info!(
+                    "TUN IP {} not yet in address table, retrying ({}/15)...",
+                    tun_ip,
+                    attempt + 1
+                );
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+        let tun_if_idx = tun_if_idx
+            .ok_or_else(|| "Cannot find TUN interface in IP address table after 3s".to_string())?;
 
         // Step 3: Host route for upstream proxy via original gateway (prevents routing loop)
         // Skip for loopback addresses — 127.0.0.0/8 already routes to loopback interface.
