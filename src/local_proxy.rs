@@ -330,134 +330,623 @@ fn log_dll_arch(path: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Route management
+// Route management via OS APIs
+//
+// Windows: IP Helper API (iphlpapi.dll) — GetIpForwardTable / CreateIpForwardEntry / DeleteIpForwardEntry
+// Linux:   /proc/net/route for reading + SIOCADDRT / SIOCDELRT ioctl for writing
 // ---------------------------------------------------------------------------
 
-fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
-    use std::process::Command;
-    log::info!("  exec: {} {}", program, args.join(" "));
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("{} failed to start: {e}", program))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    if !stdout.trim().is_empty() {
-        log::info!("  stdout: {}", stdout.trim());
+/// Resolve hostname to IPv4 address (DNS if needed).
+fn resolve_to_ipv4(host: &str) -> Result<Ipv4Addr, String> {
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        return Ok(ip);
     }
-    if !stderr.trim().is_empty() {
-        log::warn!("  stderr: {}", stderr.trim());
+    use std::net::ToSocketAddrs;
+    let addr_str = format!("{}:0", host);
+    for addr in addr_str
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolve {}: {e}", host))?
+    {
+        if let std::net::SocketAddr::V4(v4) = addr {
+            log::info!("Resolved {} -> {}", host, v4.ip());
+            return Ok(*v4.ip());
+        }
     }
-    if !output.status.success() {
-        log::warn!("  exit code: {:?}", output.status.code());
-    }
-    Ok(stdout)
+    Err(format!("Cannot resolve {} to IPv4", host))
 }
 
-fn add_routes(upstream_host: &str) -> Result<(), String> {
-    log::info!("Adding routes (upstream_host={})", upstream_host);
+// ---- Windows: IP Helper API (raw FFI to iphlpapi.dll) ----
 
-    #[cfg(target_os = "linux")]
-    {
-        // Step 1: Find the original default gateway FIRST
-        let output = run_cmd("ip", &["route", "show", "default"])?;
-        let mut original_gw: Option<String> = None;
-        let mut original_dev: Option<String> = None;
-        if let Some(gw_line) = output.lines().next() {
-            let parts: Vec<&str> = gw_line.split_whitespace().collect();
-            if let (Some("via"), Some(gw), Some("dev"), Some(dev)) =
-                (parts.get(1).copied(), parts.get(2).copied(), parts.get(3).copied(), parts.get(4).copied())
-            {
-                log::info!("Original gateway: {} via dev {}", gw, dev);
-                original_gw = Some(gw.to_string());
-                original_dev = Some(dev.to_string());
+#[cfg(target_os = "windows")]
+mod win_route {
+    use std::net::Ipv4Addr;
+
+    const NO_ERROR: u32 = 0;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    const ERROR_OBJECT_ALREADY_EXISTS: u32 = 5010;
+    const MIB_IPROUTE_TYPE_INDIRECT: u32 = 4;
+    const MIB_IPPROTO_NETMGMT: u32 = 3;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct MIB_IPFORWARDROW {
+        pub dwForwardDest: u32,
+        pub dwForwardMask: u32,
+        pub dwForwardPolicy: u32,
+        pub dwForwardNextHop: u32,
+        pub dwForwardIfIndex: u32,
+        pub dwForwardType: u32,
+        pub dwForwardProto: u32,
+        pub dwForwardAge: u32,
+        pub dwForwardNextHopAS: u32,
+        pub dwForwardMetric1: u32,
+        pub dwForwardMetric2: u32,
+        pub dwForwardMetric3: u32,
+        pub dwForwardMetric4: u32,
+        pub dwForwardMetric5: u32,
+    }
+
+    #[repr(C)]
+    pub struct MIB_IPFORWARDTABLE {
+        pub dwNumEntries: u32,
+        pub table: [MIB_IPFORWARDROW; 1], // variable-length
+    }
+
+    #[link(name = "iphlpapi")]
+    extern "system" {
+        fn GetIpForwardTable(
+            pIpForwardTable: *mut MIB_IPFORWARDTABLE,
+            pdwSize: *mut u32,
+            bOrder: i32,
+        ) -> u32;
+        fn CreateIpForwardEntry(pRoute: *const MIB_IPFORWARDROW) -> u32;
+        fn DeleteIpForwardEntry(pRoute: *const MIB_IPFORWARDROW) -> u32;
+    }
+
+    pub fn ip_to_nbo(ip: Ipv4Addr) -> u32 {
+        u32::from_ne_bytes(ip.octets())
+    }
+
+    pub fn nbo_to_ip(val: u32) -> Ipv4Addr {
+        Ipv4Addr::from(val.to_ne_bytes())
+    }
+
+    /// Snapshot of the IPv4 routing table.
+    pub struct RouteTable {
+        buffer: Vec<u8>,
+    }
+
+    impl RouteTable {
+        pub fn read() -> Result<Self, String> {
+            unsafe {
+                let mut size: u32 = 0;
+                let ret = GetIpForwardTable(std::ptr::null_mut(), &mut size, 0);
+                if ret != ERROR_INSUFFICIENT_BUFFER && ret != NO_ERROR {
+                    return Err(format!("GetIpForwardTable size query: error {}", ret));
+                }
+                let mut buffer = vec![0u8; size as usize];
+                let table_ptr = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
+                let ret = GetIpForwardTable(table_ptr, &mut size, 0);
+                if ret != NO_ERROR {
+                    return Err(format!("GetIpForwardTable: error {}", ret));
+                }
+                Ok(RouteTable { buffer })
             }
         }
 
-        // Step 2: Add specific route for upstream proxy host via original gateway
-        // This MUST be done BEFORE adding the default TUN route to prevent routing loop
-        if let (Some(gw), Some(dev)) = (&original_gw, &original_dev) {
-            log::info!("Adding host route for upstream proxy {} via {} dev {}", upstream_host, gw, dev);
-            let _ = run_cmd("ip", &["route", "add", upstream_host, "via", gw, "dev", dev]);
-        } else {
-            log::warn!("No original gateway found! Upstream proxy traffic may loop through TUN.");
+        pub fn entries(&self) -> &[MIB_IPFORWARDROW] {
+            unsafe {
+                let table = self.buffer.as_ptr() as *const MIB_IPFORWARDTABLE;
+                let num = (*table).dwNumEntries as usize;
+                std::slice::from_raw_parts(&(*table).table[0], num)
+            }
         }
 
-        // Step 3: Add default route through TUN with low metric
-        log::info!("Adding default route via TUN device {}", TUN_NAME);
-        let _ = run_cmd("ip", &["route", "add", "default", "dev", TUN_NAME, "metric", "1"]);
+        /// Find the default gateway route (0.0.0.0/0) that is NOT via the TUN device.
+        pub fn find_original_default_gw(&self, tun_ip: Ipv4Addr) -> Option<MIB_IPFORWARDROW> {
+            let tun_nbo = ip_to_nbo(tun_ip);
+            for entry in self.entries() {
+                if entry.dwForwardDest == 0
+                    && entry.dwForwardMask == 0
+                    && entry.dwForwardNextHop != tun_nbo
+                {
+                    let gw = nbo_to_ip(entry.dwForwardNextHop);
+                    log::info!(
+                        "Original default gateway: {} (if_index={}, metric={})",
+                        gw,
+                        entry.dwForwardIfIndex,
+                        entry.dwForwardMetric1
+                    );
+                    return Some(*entry);
+                }
+            }
+            None
+        }
 
-        // Step 4: Verify routing
-        let _ = run_cmd("ip", &["route", "show"]);
+        /// Find the interface index of the TUN device by looking for its subnet route.
+        pub fn find_tun_if_index(&self, tun_ip: Ipv4Addr) -> Option<u32> {
+            let octets = tun_ip.octets();
+            let subnet = ip_to_nbo(Ipv4Addr::new(octets[0], octets[1], octets[2], 0));
+            let mask24 = ip_to_nbo(Ipv4Addr::new(255, 255, 255, 0));
+            for entry in self.entries() {
+                if entry.dwForwardDest == subnet && entry.dwForwardMask == mask24 {
+                    log::info!("TUN interface index: {} (from subnet route)", entry.dwForwardIfIndex);
+                    return Some(entry.dwForwardIfIndex);
+                }
+            }
+            // Fallback: look for any route whose nexthop is the TUN IP
+            let tun_nbo = ip_to_nbo(tun_ip);
+            for entry in self.entries() {
+                if entry.dwForwardNextHop == tun_nbo {
+                    log::info!("TUN interface index: {} (from nexthop match)", entry.dwForwardIfIndex);
+                    return Some(entry.dwForwardIfIndex);
+                }
+            }
+            None
+        }
 
-        Ok(())
+        pub fn log_table(&self) {
+            let entries = self.entries();
+            log::info!("IP route table ({} entries):", entries.len());
+            for (i, e) in entries.iter().enumerate() {
+                log::info!(
+                    "  [{}] {}/{} gw={} if={} metric={} proto={}",
+                    i,
+                    nbo_to_ip(e.dwForwardDest),
+                    nbo_to_ip(e.dwForwardMask),
+                    nbo_to_ip(e.dwForwardNextHop),
+                    e.dwForwardIfIndex,
+                    e.dwForwardMetric1,
+                    e.dwForwardProto
+                );
+            }
+        }
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        // Step 1: Read existing route table to find original default gateway FIRST
-        log::info!("Reading existing route table...");
-        let route_table = run_cmd("route", &["print", "0.0.0.0"])?;
-        let mut original_gw: Option<String> = None;
-        for line in route_table.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            // Windows route table: Network Destination  Netmask  Gateway  Interface  Metric
-            if parts.first() == Some(&"0.0.0.0") && parts.get(1) == Some(&"0.0.0.0") {
-                if let Some(gw) = parts.get(2) {
-                    if *gw != TUN_ADDR && *gw != "On-link" {
-                        log::info!("Found original gateway: {}", gw);
-                        original_gw = Some(gw.to_string());
-                        break;
-                    }
+    pub fn create_route(
+        dest: Ipv4Addr,
+        mask: Ipv4Addr,
+        gateway_nbo: u32,
+        if_index: u32,
+        metric: u32,
+    ) -> Result<(), String> {
+        let row = MIB_IPFORWARDROW {
+            dwForwardDest: ip_to_nbo(dest),
+            dwForwardMask: ip_to_nbo(mask),
+            dwForwardPolicy: 0,
+            dwForwardNextHop: gateway_nbo,
+            dwForwardIfIndex: if_index,
+            dwForwardType: MIB_IPROUTE_TYPE_INDIRECT,
+            dwForwardProto: MIB_IPPROTO_NETMGMT,
+            dwForwardAge: 0,
+            dwForwardNextHopAS: 0,
+            dwForwardMetric1: metric,
+            dwForwardMetric2: u32::MAX,
+            dwForwardMetric3: u32::MAX,
+            dwForwardMetric4: u32::MAX,
+            dwForwardMetric5: u32::MAX,
+        };
+
+        let ret = unsafe { CreateIpForwardEntry(&row) };
+        let gw_ip = nbo_to_ip(gateway_nbo);
+        if ret == NO_ERROR || ret == ERROR_OBJECT_ALREADY_EXISTS {
+            log::info!(
+                "Route created: {}/{} -> {} (if={}, metric={}){}",
+                dest,
+                mask,
+                gw_ip,
+                if_index,
+                metric,
+                if ret == ERROR_OBJECT_ALREADY_EXISTS {
+                    " [already existed]"
+                } else {
+                    ""
+                }
+            );
+            Ok(())
+        } else {
+            Err(format!(
+                "CreateIpForwardEntry {}/{} via {}: error {}",
+                dest, mask, gw_ip, ret
+            ))
+        }
+    }
+
+    pub fn delete_route(
+        dest: Ipv4Addr,
+        mask: Ipv4Addr,
+        gateway_nbo: u32,
+        if_index: u32,
+    ) {
+        let row = MIB_IPFORWARDROW {
+            dwForwardDest: ip_to_nbo(dest),
+            dwForwardMask: ip_to_nbo(mask),
+            dwForwardPolicy: 0,
+            dwForwardNextHop: gateway_nbo,
+            dwForwardIfIndex: if_index,
+            ..Default::default()
+        };
+
+        let ret = unsafe { DeleteIpForwardEntry(&row) };
+        if ret == NO_ERROR {
+            log::info!("Route deleted: {}/{}", dest, mask);
+        } else {
+            log::warn!("DeleteIpForwardEntry {}/{}: error {}", dest, mask, ret);
+        }
+    }
+}
+
+// ---- Linux: /proc/net/route + SIOCADDRT / SIOCDELRT ioctl ----
+
+#[cfg(target_os = "linux")]
+mod linux_route {
+    use std::net::Ipv4Addr;
+
+    const RTF_UP: u16 = 0x0001;
+    const RTF_GATEWAY: u16 = 0x0002;
+    const RTF_HOST: u16 = 0x0004;
+
+    /// Kernel `struct rtentry` (see <net/route.h>). Layout must match C on target arch.
+    #[repr(C)]
+    struct RtEntry {
+        rt_pad1: libc::c_ulong,
+        rt_dst: libc::sockaddr,
+        rt_gateway: libc::sockaddr,
+        rt_genmask: libc::sockaddr,
+        rt_flags: libc::c_ushort,
+        rt_pad2: libc::c_short,
+        rt_pad3: libc::c_ulong,
+        rt_pad4: *mut libc::c_void,
+        rt_metric: libc::c_short,
+        rt_dev: *mut libc::c_char,
+        rt_mtu: libc::c_ulong,
+        rt_window: libc::c_ulong,
+        rt_irtt: libc::c_ushort,
+    }
+
+    fn make_sockaddr(ip: Ipv4Addr) -> libc::sockaddr {
+        unsafe {
+            let mut sin: libc::sockaddr_in = std::mem::zeroed();
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_addr.s_addr = u32::from_ne_bytes(ip.octets());
+            *(&sin as *const libc::sockaddr_in as *const libc::sockaddr)
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct DefaultGateway {
+        pub gateway: Ipv4Addr,
+        pub device: String,
+    }
+
+    /// Read /proc/net/route to find the original default gateway (not through TUN).
+    pub fn find_default_gateway(exclude_dev: &str) -> Option<DefaultGateway> {
+        let content = std::fs::read_to_string("/proc/net/route").ok()?;
+        for line in content.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 8 {
+                continue;
+            }
+            let iface = fields[0];
+            let dest = fields[1];
+            let gateway = fields[2];
+            let mask = fields[7];
+
+            // Default route: Destination=00000000, Mask=00000000
+            if dest == "00000000" && mask == "00000000" && iface != exclude_dev {
+                if let Ok(gw_val) = u32::from_str_radix(gateway, 16) {
+                    let gw_ip = Ipv4Addr::from(gw_val.to_ne_bytes());
+                    log::info!(
+                        "Default gateway from /proc/net/route: {} dev {}",
+                        gw_ip,
+                        iface
+                    );
+                    return Some(DefaultGateway {
+                        gateway: gw_ip,
+                        device: iface.to_string(),
+                    });
                 }
             }
         }
+        None
+    }
 
-        // Step 2: Add specific route for upstream proxy host via original gateway
-        // This MUST be done BEFORE the default TUN route to prevent routing loop
-        if let Some(gw) = &original_gw {
-            log::info!("Adding host route for upstream proxy {} via {}", upstream_host, gw);
-            let _ = run_cmd("route", &["add", upstream_host, "mask", "255.255.255.255", gw, "metric", "1"]);
+    /// Add a route via SIOCADDRT ioctl.
+    pub fn add_route(
+        dest: Ipv4Addr,
+        mask: Ipv4Addr,
+        gateway: Option<Ipv4Addr>,
+        dev: Option<&str>,
+        metric: i16,
+    ) -> Result<(), String> {
+        unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+            if fd < 0 {
+                return Err(format!(
+                    "socket(): {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut rt: RtEntry = std::mem::zeroed();
+            rt.rt_dst = make_sockaddr(dest);
+            rt.rt_genmask = make_sockaddr(mask);
+            rt.rt_flags = RTF_UP;
+            rt.rt_metric = metric;
+
+            if let Some(gw) = gateway {
+                rt.rt_gateway = make_sockaddr(gw);
+                rt.rt_flags |= RTF_GATEWAY;
+            }
+
+            if mask == Ipv4Addr::new(255, 255, 255, 255) {
+                rt.rt_flags |= RTF_HOST;
+            }
+
+            let dev_cstr;
+            if let Some(d) = dev {
+                dev_cstr =
+                    std::ffi::CString::new(d).map_err(|e| format!("CString: {e}"))?;
+                rt.rt_dev = dev_cstr.as_ptr() as *mut libc::c_char;
+            }
+
+            let ret = libc::ioctl(fd, libc::SIOCADDRT, &rt as *const RtEntry);
+            libc::close(fd);
+
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EEXIST) {
+                    log::info!("Route already exists: {}/{} (ok)", dest, mask);
+                    return Ok(());
+                }
+                return Err(format!("SIOCADDRT {}/{}: {}", dest, mask, err));
+            }
+
+            log::info!(
+                "Route added: {}/{} gw={:?} dev={:?} metric={}",
+                dest,
+                mask,
+                gateway,
+                dev,
+                metric
+            );
+            Ok(())
+        }
+    }
+
+    /// Delete a route via SIOCDELRT ioctl.
+    pub fn delete_route(dest: Ipv4Addr, mask: Ipv4Addr, dev: Option<&str>) {
+        unsafe {
+            let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+            if fd < 0 {
+                log::warn!("socket() for SIOCDELRT failed");
+                return;
+            }
+
+            let mut rt: RtEntry = std::mem::zeroed();
+            rt.rt_dst = make_sockaddr(dest);
+            rt.rt_genmask = make_sockaddr(mask);
+            rt.rt_flags = RTF_UP;
+
+            let dev_cstr;
+            if let Some(d) = dev {
+                dev_cstr = std::ffi::CString::new(d).ok();
+                if let Some(ref c) = dev_cstr {
+                    rt.rt_dev = c.as_ptr() as *mut libc::c_char;
+                }
+            }
+
+            let ret = libc::ioctl(fd, libc::SIOCDELRT, &rt as *const RtEntry);
+            libc::close(fd);
+
+            if ret < 0 {
+                log::warn!(
+                    "SIOCDELRT {}/{}: {}",
+                    dest,
+                    mask,
+                    std::io::Error::last_os_error()
+                );
+            } else {
+                log::info!("Route deleted: {}/{}", dest, mask);
+            }
+        }
+    }
+
+    /// Log current route table from /proc/net/route.
+    pub fn log_route_table() {
+        match std::fs::read_to_string("/proc/net/route") {
+            Ok(content) => {
+                log::info!("Route table (/proc/net/route):");
+                for line in content.lines() {
+                    log::info!("  {}", line);
+                }
+            }
+            Err(e) => log::warn!("Cannot read /proc/net/route: {}", e),
+        }
+    }
+}
+
+// ---- Common route management ----
+
+fn add_routes(upstream_host: &str) -> Result<(), String> {
+    let upstream_ip = resolve_to_ipv4(upstream_host)?;
+    log::info!("Adding routes (upstream={} -> {})", upstream_host, upstream_ip);
+
+    #[cfg(target_os = "linux")]
+    {
+        // Step 1: Find original default gateway (from /proc/net/route)
+        let gw = linux_route::find_default_gateway(TUN_NAME);
+
+        // Step 2: Host route for upstream proxy via original gateway (prevents routing loop)
+        if let Some(ref gw_info) = gw {
+            log::info!(
+                "Adding host route for upstream {} via {} dev {}",
+                upstream_ip,
+                gw_info.gateway,
+                gw_info.device
+            );
+            linux_route::add_route(
+                upstream_ip,
+                Ipv4Addr::new(255, 255, 255, 255),
+                Some(gw_info.gateway),
+                Some(&gw_info.device),
+                0,
+            )?;
         } else {
-            log::warn!("No original gateway found! Upstream proxy traffic may loop through TUN.");
+            log::warn!("No original default gateway found! Routing loop risk.");
         }
 
-        // Step 3: Add default route via TUN with very low metric (1) to override existing routes
-        // Use two /1 routes (0.0.0.0/1 and 128.0.0.0/1) instead of a single 0.0.0.0/0 route.
-        // This is more reliable because it's more specific than any existing 0.0.0.0/0 default
-        // route and will always win in the routing table regardless of metric.
-        log::info!("Adding split default routes via TUN (0.0.0.0/1 + 128.0.0.0/1)");
-        let _ = run_cmd("route", &["add", "0.0.0.0", "mask", "128.0.0.0", TUN_ADDR, "metric", "1"]);
-        let _ = run_cmd("route", &["add", "128.0.0.0", "mask", "128.0.0.0", TUN_ADDR, "metric", "1"]);
+        // Step 3: Split default routes via TUN (0.0.0.0/1 + 128.0.0.0/1)
+        // More specific than any /0 default route → always wins regardless of metric.
+        linux_route::add_route(
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(128, 0, 0, 0),
+            None,
+            Some(TUN_NAME),
+            1,
+        )?;
+        linux_route::add_route(
+            Ipv4Addr::new(128, 0, 0, 0),
+            Ipv4Addr::new(128, 0, 0, 0),
+            None,
+            Some(TUN_NAME),
+            1,
+        )?;
 
-        // Step 4: Verify routing
-        log::info!("Verifying route table after changes:");
-        let _ = run_cmd("route", &["print", "0.0.0.0"]);
+        // Step 4: Verify
+        linux_route::log_route_table();
+        Ok(())
+    }
 
+    #[cfg(target_os = "windows")]
+    {
+        let tun_ip: Ipv4Addr = TUN_ADDR.parse().unwrap();
+
+        // Step 1: Read route table via GetIpForwardTable
+        let snapshot = win_route::RouteTable::read()?;
+        snapshot.log_table();
+
+        // Step 2: Find original gateway & TUN interface index
+        let original_gw = snapshot.find_original_default_gw(tun_ip);
+        let tun_if_idx = snapshot
+            .find_tun_if_index(tun_ip)
+            .ok_or_else(|| "Cannot find TUN interface index in route table".to_string())?;
+
+        // Step 3: Host route for upstream proxy via original gateway (prevents routing loop)
+        if let Some(gw_row) = &original_gw {
+            log::info!("Adding host route for upstream proxy {}", upstream_ip);
+            win_route::create_route(
+                upstream_ip,
+                Ipv4Addr::new(255, 255, 255, 255),
+                gw_row.dwForwardNextHop,
+                gw_row.dwForwardIfIndex,
+                1,
+            )?;
+        } else {
+            log::warn!("No original default gateway found! Routing loop risk.");
+        }
+
+        // Step 4: Split default routes via TUN (0.0.0.0/1 + 128.0.0.0/1)
+        let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
+        win_route::create_route(
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(128, 0, 0, 0),
+            tun_gw_nbo,
+            tun_if_idx,
+            1,
+        )?;
+        win_route::create_route(
+            Ipv4Addr::new(128, 0, 0, 0),
+            Ipv4Addr::new(128, 0, 0, 0),
+            tun_gw_nbo,
+            tun_if_idx,
+            1,
+        )?;
+
+        // Step 5: Verify
+        if let Ok(snap) = win_route::RouteTable::read() {
+            snap.log_table();
+        }
         Ok(())
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    { let _ = upstream_host; Ok(()) }
+    {
+        let _ = upstream_ip;
+        Ok(())
+    }
 }
 
 fn remove_routes(upstream_host: &str) {
-    log::info!("Removing routes");
+    let upstream_ip = match resolve_to_ipv4(upstream_host) {
+        Ok(ip) => ip,
+        Err(e) => {
+            log::warn!("Cannot resolve upstream for route cleanup: {e}");
+            return;
+        }
+    };
+    log::info!("Removing routes (upstream={})", upstream_ip);
+
     #[cfg(target_os = "linux")]
     {
-        let _ = run_cmd("ip", &["route", "del", "default", "dev", TUN_NAME]);
-        let _ = run_cmd("ip", &["route", "del", upstream_host]);
+        linux_route::delete_route(
+            Ipv4Addr::new(0, 0, 0, 0),
+            Ipv4Addr::new(128, 0, 0, 0),
+            Some(TUN_NAME),
+        );
+        linux_route::delete_route(
+            Ipv4Addr::new(128, 0, 0, 0),
+            Ipv4Addr::new(128, 0, 0, 0),
+            Some(TUN_NAME),
+        );
+        linux_route::delete_route(
+            upstream_ip,
+            Ipv4Addr::new(255, 255, 255, 255),
+            None,
+        );
     }
+
     #[cfg(target_os = "windows")]
     {
-        // Remove the split /1 routes
-        let _ = run_cmd("route", &["delete", "0.0.0.0", "mask", "128.0.0.0", TUN_ADDR]);
-        let _ = run_cmd("route", &["delete", "128.0.0.0", "mask", "128.0.0.0", TUN_ADDR]);
-        // Remove upstream host route
-        let _ = run_cmd("route", &["delete", upstream_host]);
+        let tun_ip: Ipv4Addr = TUN_ADDR.parse().unwrap();
+        let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
+
+        if let Ok(snapshot) = win_route::RouteTable::read() {
+            // Remove TUN split routes
+            if let Some(tun_if_idx) = snapshot.find_tun_if_index(tun_ip) {
+                win_route::delete_route(
+                    Ipv4Addr::new(0, 0, 0, 0),
+                    Ipv4Addr::new(128, 0, 0, 0),
+                    tun_gw_nbo,
+                    tun_if_idx,
+                );
+                win_route::delete_route(
+                    Ipv4Addr::new(128, 0, 0, 0),
+                    Ipv4Addr::new(128, 0, 0, 0),
+                    tun_gw_nbo,
+                    tun_if_idx,
+                );
+            }
+            // Remove upstream host route
+            for entry in snapshot.entries() {
+                let dest = win_route::nbo_to_ip(entry.dwForwardDest);
+                if dest == upstream_ip && entry.dwForwardMask == u32::MAX {
+                    win_route::delete_route(
+                        upstream_ip,
+                        Ipv4Addr::new(255, 255, 255, 255),
+                        entry.dwForwardNextHop,
+                        entry.dwForwardIfIndex,
+                    );
+                    break;
+                }
+            }
+        }
     }
+
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    { let _ = upstream_host; }
+    {
+        let _ = upstream_ip;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -863,10 +1352,6 @@ async fn proxy_loop(
     log::info!("Proxy loop stopped");
 }
 
-fn format_ip(addr: &[u8; 4]) -> String {
-    format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3])
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -951,12 +1436,6 @@ mod tests {
         assert_eq!(bridge.rx_queue.len(), 1);
         let now = SmolInstant::from_millis(0);
         assert!(bridge.receive(now).is_some());
-    }
-
-    #[test]
-    fn format_ip_works() {
-        assert_eq!(format_ip(&[10, 0, 85, 1]), "10.0.85.1");
-        assert_eq!(format_ip(&[192, 168, 1, 1]), "192.168.1.1");
     }
 
     #[test]
