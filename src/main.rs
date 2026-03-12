@@ -2,8 +2,6 @@ mod app;
 mod local_proxy;
 mod models;
 mod storage;
-#[allow(dead_code)]
-mod system_proxy;
 mod tester;
 mod ui;
 
