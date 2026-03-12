@@ -31,6 +31,9 @@ pub struct AppState {
 
     // egui context for repaint requests
     pub egui_ctx: Option<egui::Context>,
+
+    // Track whether theme has been applied
+    pub theme_applied: bool,
 }
 
 impl AppState {
@@ -50,6 +53,7 @@ impl AppState {
             needs_save: false,
             save_error: None,
             egui_ctx: None,
+            theme_applied: false,
         }
     }
 
@@ -160,6 +164,12 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply theme once
+        if !self.state.theme_applied {
+            crate::ui::apply_theme(ctx);
+            self.state.theme_applied = true;
+        }
+
         // Store egui context for repaint requests
         if self.state.egui_ctx.is_none() {
             self.state.egui_ctx = Some(ctx.clone());
@@ -168,49 +178,81 @@ impl eframe::App for App {
         // Poll async test results
         self.state.poll_test_result();
 
-        // Top panel: title bar + proxy status
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("PROXY MANAGER");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let status = self.state.proxy_status.lock().unwrap();
-                    if status.running {
-                        ui.label(
-                            egui::RichText::new(format!("TUN PROXY [ON] {}", status.tun_addr))
-                                .color(crate::ui::COLOR_SUCCESS),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("({} conns)", status.connections))
-                                .small()
-                                .color(egui::Color32::GRAY),
-                        );
-                    } else {
-                        ui.label(
-                            egui::RichText::new("TUN PROXY [OFF]")
-                                .color(crate::ui::COLOR_IDLE),
-                        );
-                    }
-                    if let Some(err) = &status.error {
-                        ui.colored_label(crate::ui::COLOR_FAILED, err.as_str());
-                    }
+        // Top panel: title + proxy status
+        egui::TopBottomPanel::top("top_bar")
+            .frame(egui::Frame::none()
+                .fill(crate::ui::BG_DARKEST)
+                .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                .stroke(egui::Stroke::new(1.0, crate::ui::BORDER)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    // App title
+                    ui.label(
+                        egui::RichText::new("Proxy Manager")
+                            .size(18.0)
+                            .strong()
+                            .color(crate::ui::TEXT_PRIMARY),
+                    );
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("v0.1")
+                            .size(11.0)
+                            .color(crate::ui::TEXT_MUTED),
+                    );
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let status = self.state.proxy_status.lock().unwrap();
+                        if status.running {
+                            // Green pill for ON
+                            let pill = egui::RichText::new(format!("  ON  {}  ", status.tun_addr))
+                                .size(11.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(6, 78, 59)); // dark green text
+                            ui.label(pill.background_color(crate::ui::COLOR_SUCCESS));
+
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(format!("{} conn", status.connections))
+                                    .size(11.0)
+                                    .color(crate::ui::TEXT_MUTED),
+                            );
+                        } else {
+                            let pill = egui::RichText::new("  OFF  ")
+                                .size(11.0)
+                                .strong()
+                                .color(crate::ui::TEXT_MUTED);
+                            ui.label(pill.background_color(crate::ui::BG_ELEVATED));
+                        }
+                        if let Some(err) = &status.error {
+                            ui.label(
+                                egui::RichText::new(err.as_str())
+                                    .size(11.0)
+                                    .color(crate::ui::COLOR_FAILED),
+                            );
+                        }
+                    });
                 });
+
+                // Show save error if any
+                if let Some(err) = &self.state.save_error {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("Save error: {err}"))
+                            .size(11.0)
+                            .color(crate::ui::COLOR_FAILED),
+                    );
+                }
             });
 
-            // Show save error if any
-            if let Some(err) = &self.state.save_error {
-                ui.colored_label(
-                    crate::ui::COLOR_FAILED,
-                    format!("Save error: {err}"),
-                );
-            }
-        });
-
-        // Main area: 3-pane layout rendered via nested panels
-        egui::CentralPanel::default().show(ctx, |ui| {
-            crate::ui::sidebar::render(ui, &mut self.state);
-            crate::ui::proxy_list::render(ui, &mut self.state);
-            crate::ui::detail::render(ui, &mut self.state);
-        });
+        // Main area: 3-pane layout
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(crate::ui::BG_DARK))
+            .show(ctx, |ui| {
+                crate::ui::sidebar::render(ui, &mut self.state);
+                crate::ui::proxy_list::render(ui, &mut self.state);
+                crate::ui::detail::render(ui, &mut self.state);
+            });
 
         // Auto-save when dirty
         if self.state.needs_save {
