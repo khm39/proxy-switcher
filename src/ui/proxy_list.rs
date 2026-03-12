@@ -90,18 +90,23 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
             // Handle deletion
             if let Some(del_id) = to_delete {
+                let mut was_active_proxy = false;
                 if let Some(profile) = profile_id
                     .as_ref()
                     .and_then(|pid| state.data.profiles.iter_mut().find(|p| &p.id == pid))
                 {
+                    was_active_proxy = profile.active_proxy_id.as_ref() == Some(&del_id);
                     profile.proxies.retain(|p| p.id != del_id);
-                    if profile.active_proxy_id.as_ref() == Some(&del_id) {
+                    if was_active_proxy {
                         profile.active_proxy_id = None;
                     }
                     if state.selected_proxy_id.as_ref() == Some(&del_id) {
                         state.selected_proxy_id = None;
                     }
                     state.needs_save = true;
+                }
+                if was_active_proxy {
+                    state.apply_system_proxy();
                 }
             }
 

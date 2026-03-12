@@ -68,8 +68,10 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                     if ui.button("Remove").clicked() {
                         if let Some(sel_id) = state.selected_profile_id.clone() {
                             if state.data.profiles.len() > 1 {
+                                let was_active =
+                                    state.data.active_profile_id.as_ref() == Some(&sel_id);
                                 state.data.profiles.retain(|p| p.id != sel_id);
-                                if state.data.active_profile_id.as_ref() == Some(&sel_id) {
+                                if was_active {
                                     state.data.active_profile_id =
                                         state.data.profiles.first().map(|p| p.id.clone());
                                 }
@@ -77,6 +79,9 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                                     state.data.profiles.first().map(|p| p.id.clone());
                                 state.selected_proxy_id = None;
                                 state.needs_save = true;
+                                if was_active {
+                                    state.apply_system_proxy();
+                                }
                             }
                         }
                     }
@@ -87,6 +92,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                     if let Some(sel_id) = state.selected_profile_id.clone() {
                         state.data.active_profile_id = Some(sel_id);
                         state.needs_save = true;
+                        state.apply_system_proxy();
                     }
                 }
 

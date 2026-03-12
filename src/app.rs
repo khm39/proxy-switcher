@@ -15,8 +15,7 @@ pub struct AppState {
     pub detail_tab: DetailTab,
     pub show_password: bool,
 
-    // System proxy state
-    pub system_proxy_on: bool,
+    // System proxy feedback
     pub system_proxy_message: Option<(bool, String)>, // (success, message)
 
     // Async test tracking
@@ -40,7 +39,6 @@ impl AppState {
             selected_proxy_id: None,
             detail_tab: DetailTab::Basic,
             show_password: false,
-            system_proxy_on: crate::system_proxy::read_current().is_some(),
             system_proxy_message: None,
             pending_test: None,
             needs_save: false,
@@ -69,6 +67,21 @@ impl AppState {
         }
     }
 
+    /// Apply the active profile's active proxy to the system, or clear if none.
+    pub fn apply_system_proxy(&mut self) {
+        let proxy = self
+            .data
+            .active_profile()
+            .and_then(|p| p.active_proxy())
+            .cloned();
+
+        let result = match proxy {
+            Some(ref p) => crate::system_proxy::apply_proxy(p),
+            None => crate::system_proxy::clear_proxy(),
+        };
+        self.system_proxy_message = Some((result.success, result.message));
+    }
+
     fn do_save(&mut self) {
         match crate::storage::save(&self.data) {
             Ok(()) => {
@@ -92,9 +105,12 @@ pub struct App {
 
 impl App {
     pub fn new(_cc: &eframe::CreationContext<'_>, rt: Arc<tokio::runtime::Runtime>) -> Self {
-        Self {
-            state: AppState::new(rt),
+        let mut state = AppState::new(rt);
+        // Apply system proxy from saved config on startup
+        if state.data.active_profile().and_then(|p| p.active_proxy()).is_some() {
+            state.apply_system_proxy();
         }
+        Self { state }
     }
 }
 
@@ -103,51 +119,32 @@ impl eframe::App for App {
         // Poll async test results
         self.state.poll_test_result();
 
-        // Top panel: title bar + system proxy toggle
+        // Top panel: title bar + system proxy status
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("PROXY MANAGER");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if self.state.system_proxy_on {
-                        "SYSTEM PROXY [ON]"
+                    let has_active = self
+                        .state
+                        .data
+                        .active_profile()
+                        .and_then(|p| p.active_proxy())
+                        .is_some();
+                    if has_active {
+                        ui.label(
+                            egui::RichText::new("SYSTEM PROXY [ON]")
+                                .color(crate::ui::COLOR_SUCCESS),
+                        );
                     } else {
-                        "SYSTEM PROXY [OFF]"
-                    };
-                    if ui.button(label).clicked() {
-                        if self.state.system_proxy_on {
-                            // Turn OFF: clear system proxy
-                            let result = crate::system_proxy::clear_proxy();
-                            self.state.system_proxy_on = !result.success;
-                            self.state.system_proxy_message =
-                                Some((result.success, result.message));
-                        } else {
-                            // Turn ON: apply active proxy from active profile
-                            if let Some(profile) = self.state.data.active_profile() {
-                                if let Some(proxy) = profile.active_proxy() {
-                                    let result =
-                                        crate::system_proxy::apply_proxy(proxy);
-                                    self.state.system_proxy_on = result.success;
-                                    self.state.system_proxy_message =
-                                        Some((result.success, result.message));
-                                } else {
-                                    self.state.system_proxy_message = Some((
-                                        false,
-                                        "No active proxy selected in the active profile"
-                                            .to_string(),
-                                    ));
-                                }
-                            } else {
-                                self.state.system_proxy_message = Some((
-                                    false,
-                                    "No active profile selected".to_string(),
-                                ));
-                            }
-                        }
+                        ui.label(
+                            egui::RichText::new("SYSTEM PROXY [OFF]")
+                                .color(crate::ui::COLOR_IDLE),
+                        );
                     }
                 });
             });
 
-            // Show system proxy status message
+            // Show system proxy feedback
             if let Some((success, msg)) = &self.state.system_proxy_message {
                 let color = if *success {
                     crate::ui::COLOR_SUCCESS
@@ -181,8 +178,5 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         let _ = crate::storage::save(&self.state.data);
-        // Optionally clear system proxy on exit to avoid leaving stale settings
-        // Uncomment the line below if you want auto-clear on exit:
-        // let _ = crate::system_proxy::clear_proxy();
     }
 }

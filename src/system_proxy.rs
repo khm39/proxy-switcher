@@ -66,6 +66,7 @@ pub fn clear_proxy() -> ProxyResult {
 }
 
 /// Read current system proxy state. Returns Some(host:port) if a proxy is set.
+#[allow(dead_code)]
 pub fn read_current() -> Option<String> {
     // Try GNOME first
     if let Some(val) = read_gnome() {
