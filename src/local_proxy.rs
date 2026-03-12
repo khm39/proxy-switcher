@@ -951,6 +951,18 @@ fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<
         let tun_if_idx = tun_if_idx
             .ok_or_else(|| "Cannot find TUN interface in IP address table after 3s".to_string())?;
 
+        // Step 2b: Re-read route table (TUN auto-routes should now exist) and get
+        // the interface metric. On Windows Vista+, CreateIpForwardEntry requires
+        // dwForwardMetric1 >= interface_metric, otherwise error 160 (BAD_ARGUMENTS).
+        let snapshot = win_route::RouteTable::read()?;
+        snapshot.log_table();
+        let tun_if_metric = snapshot.entries()
+            .iter()
+            .find(|e| e.dwForwardIfIndex == tun_if_idx)
+            .map(|e| e.dwForwardMetric1)
+            .unwrap_or(261); // safe default if no existing routes found
+        log::info!("TUN interface metric: {} (if_idx={})", tun_if_metric, tun_if_idx);
+
         // Step 3: Host route for upstream proxy via original gateway (prevents routing loop)
         // Skip for loopback addresses — 127.0.0.0/8 already routes to loopback interface.
         let is_loopback = upstream_ip.octets()[0] == 127;
@@ -963,7 +975,7 @@ fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<
                 Ipv4Addr::new(255, 255, 255, 255),
                 gw_row.dwForwardNextHop,
                 gw_row.dwForwardIfIndex,
-                1,
+                gw_row.dwForwardMetric1, // use original route's metric
                 false, // indirect: via gateway
             )?;
         } else {
@@ -972,15 +984,14 @@ fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<
 
         // Step 4: Split default routes via TUN (0.0.0.0/1 + 128.0.0.0/1)
         // Next hop = TUN gateway IP (e.g. 172.29.0.2), NOT TUN's own IP.
-        // Windows requires next hop to be a reachable remote host on the interface subnet.
-        // Using the interface's own IP as gateway causes error 160 (BAD_ARGUMENTS).
+        // Metric must be >= TUN interface metric (Vista+ requirement).
         let tun_gw_nbo = win_route::ip_to_nbo(tun_gw);
         win_route::create_route(
             Ipv4Addr::new(0, 0, 0, 0),
             Ipv4Addr::new(128, 0, 0, 0),
             tun_gw_nbo,
             tun_if_idx,
-            1,
+            tun_if_metric,
             false, // indirect: via TUN gateway
         )?;
         win_route::create_route(
@@ -988,7 +999,7 @@ fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<
             Ipv4Addr::new(128, 0, 0, 0),
             tun_gw_nbo,
             tun_if_idx,
-            1,
+            tun_if_metric,
             false, // indirect: via TUN gateway
         )?;
 
