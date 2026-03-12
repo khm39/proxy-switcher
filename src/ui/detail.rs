@@ -17,7 +17,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                 .fill(super::BG_MID)
                 .inner_margin(egui::Margin {
                         left: 20.0,
-                        right: 28.0,
+                        right: 40.0,
                         top: 16.0,
                         bottom: 16.0,
                     }),
@@ -117,13 +117,27 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     match state.detail_tab {
                         DetailTab::Basic => {
-                            render_basic_tab(ui, state, &proxy_id);
+                            render_basic_tab_form(ui, state, &proxy_id);
                         }
                         DetailTab::PortFilter => {
-                            render_port_filter_tab(ui, state, &proxy_id);
+                            render_port_filter_tab_form(ui, state, &proxy_id);
                         }
                         DetailTab::Note => {
-                            render_note_tab(ui, state, &proxy_id);
+                            render_note_tab_form(ui, state, &proxy_id);
+                        }
+                    }
+
+                    ui.add_space(12.0);
+
+                    // Action buttons — always at the bottom of scrollable content
+                    match state.detail_tab {
+                        DetailTab::Basic => {
+                            render_basic_tab_buttons(ui, state, &proxy_id);
+                        }
+                        DetailTab::PortFilter | DetailTab::Note => {
+                            if ui.button(RichText::new("Save").size(13.0)).clicked() {
+                                state.needs_save = true;
+                            }
                         }
                     }
                 });
@@ -151,7 +165,7 @@ fn find_proxy_mut<'a>(state: &'a mut AppState, proxy_id: &str) -> Option<&'a mut
     state.data.proxies.iter_mut().find(|p| p.id == proxy_id)
 }
 
-fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
+fn render_basic_tab_form(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
     let mut show_password = state.show_password;
 
     let Some(proxy) = find_proxy_mut(state, proxy_id) else {
@@ -286,10 +300,9 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
         });
 
     state.show_password = show_password;
+}
 
-    ui.add_space(12.0);
-
-    // Action buttons
+fn render_basic_tab_buttons(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
     let proxy_url = state
         .data
         .proxies
@@ -359,7 +372,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
     });
 }
 
-fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
+fn render_port_filter_tab_form(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
     let Some(proxy) = find_proxy_mut(state, proxy_id) else {
         return;
     };
@@ -452,14 +465,9 @@ fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 }
             });
         });
-
-    ui.add_space(12.0);
-    if ui.button(RichText::new("Save").size(13.0)).clicked() {
-        state.needs_save = true;
-    }
 }
 
-fn render_note_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
+fn render_note_tab_form(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
     let Some(proxy) = find_proxy_mut(state, proxy_id) else {
         return;
     };
@@ -487,11 +495,6 @@ fn render_note_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 );
             });
         });
-
-    ui.add_space(12.0);
-    if ui.button(RichText::new("Save").size(13.0)).clicked() {
-        state.needs_save = true;
-    }
 }
 
 // ---------------------------------------------------------------------------
