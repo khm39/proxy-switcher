@@ -195,7 +195,7 @@ impl eframe::App for App {
                             let pill = egui::RichText::new(format!("  ON  {}  ", status.tun_addr))
                                 .size(11.0)
                                 .strong()
-                                .color(egui::Color32::from_rgb(6, 78, 59));
+                                .color(egui::Color32::from_rgb(18, 18, 18));
                             ui.label(pill.background_color(crate::ui::COLOR_SUCCESS));
 
                             ui.add_space(6.0);

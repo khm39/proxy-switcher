@@ -138,134 +138,137 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
         .stroke(egui::Stroke::new(1.0, super::BORDER))
         .show(ui, |ui| {
             super::input_field_scope(ui, |ui| {
-                egui::Grid::new("proxy_basic_grid")
-                    .num_columns(2)
-                    .spacing([16.0, 12.0])
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Proxy Name")
-                                .size(12.0)
-                                .color(super::TEXT_SECONDARY),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut proxy.name)
-                                .desired_width(250.0)
-                                .margin(egui::vec2(8.0, 4.0)),
-                        );
-                        ui.end_row();
+                let field_width = ui.available_width();
 
-                        ui.label(
-                            RichText::new("Type")
-                                .size(12.0)
-                                .color(super::TEXT_SECONDARY),
-                        );
-                        egui::ComboBox::from_id_source("proxy_type_combo")
-                            .selected_text(
-                                RichText::new(proxy.proxy_type.to_string())
-                                    .size(12.0)
-                                    .color(super::TEXT_PRIMARY),
-                            )
-                            .width(250.0)
-                            .show_ui(ui, |ui| {
-                                for pt in ProxyType::ALL {
-                                    ui.selectable_value(
-                                        &mut proxy.proxy_type,
-                                        pt,
-                                        pt.to_string(),
-                                    );
-                                }
-                            });
-                        ui.end_row();
+                // Proxy Name
+                ui.label(
+                    RichText::new("Proxy Name")
+                        .size(12.0)
+                        .color(super::TEXT_SECONDARY),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut proxy.name)
+                        .desired_width(field_width)
+                        .margin(egui::vec2(8.0, 4.0)),
+                );
+                ui.add_space(8.0);
 
-                        ui.label(
-                            RichText::new("Host")
-                                .size(12.0)
-                                .color(super::TEXT_SECONDARY),
-                        );
-                        ui.add(
-                            egui::TextEdit::singleline(&mut proxy.host)
-                                .desired_width(250.0)
-                                .margin(egui::vec2(8.0, 4.0))
-                                .hint_text("e.g. proxy.example.com"),
-                        );
-                        ui.end_row();
-
-                        ui.label(
-                            RichText::new("Port")
-                                .size(12.0)
-                                .color(super::TEXT_SECONDARY),
-                        );
-                        {
-                            let mut port_str = proxy.port.to_string();
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut port_str)
-                                    .desired_width(250.0)
-                                    .margin(egui::vec2(8.0, 4.0))
-                                    .hint_text("1-65535"),
+                // Type
+                ui.label(
+                    RichText::new("Type")
+                        .size(12.0)
+                        .color(super::TEXT_SECONDARY),
+                );
+                egui::ComboBox::from_id_source("proxy_type_combo")
+                    .selected_text(
+                        RichText::new(proxy.proxy_type.to_string())
+                            .size(12.0)
+                            .color(super::TEXT_PRIMARY),
+                    )
+                    .width(field_width)
+                    .show_ui(ui, |ui| {
+                        for pt in ProxyType::ALL {
+                            ui.selectable_value(
+                                &mut proxy.proxy_type,
+                                pt,
+                                pt.to_string(),
                             );
-                            if resp.changed() {
-                                if let Ok(p) = port_str.parse::<u16>() {
-                                    if p >= 1 {
-                                        proxy.port = p;
-                                    }
-                                }
+                        }
+                    });
+                ui.add_space(8.0);
+
+                // Host
+                ui.label(
+                    RichText::new("Host")
+                        .size(12.0)
+                        .color(super::TEXT_SECONDARY),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut proxy.host)
+                        .desired_width(field_width)
+                        .margin(egui::vec2(8.0, 4.0))
+                        .hint_text("e.g. proxy.example.com"),
+                );
+                ui.add_space(8.0);
+
+                // Port
+                ui.label(
+                    RichText::new("Port")
+                        .size(12.0)
+                        .color(super::TEXT_SECONDARY),
+                );
+                {
+                    let mut port_str = proxy.port.to_string();
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut port_str)
+                            .desired_width(field_width)
+                            .margin(egui::vec2(8.0, 4.0))
+                            .hint_text("1-65535"),
+                    );
+                    if resp.changed() {
+                        if let Ok(p) = port_str.parse::<u16>() {
+                            if p >= 1 {
+                                proxy.port = p;
                             }
                         }
-                        ui.end_row();
+                    }
+                }
+                ui.add_space(8.0);
 
-                        ui.label(
-                            RichText::new("Username")
-                                .size(12.0)
-                                .color(super::TEXT_SECONDARY),
-                        );
+                // Username
+                ui.label(
+                    RichText::new("Username")
+                        .size(12.0)
+                        .color(super::TEXT_SECONDARY),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut proxy.username)
+                        .desired_width(field_width)
+                        .margin(egui::vec2(8.0, 4.0))
+                        .hint_text("optional"),
+                );
+                ui.add_space(8.0);
+
+                // Password
+                ui.label(
+                    RichText::new("Password")
+                        .size(12.0)
+                        .color(super::TEXT_SECONDARY),
+                );
+                ui.horizontal(|ui| {
+                    let pw_width = ui.available_width() - 60.0;
+                    if show_password {
                         ui.add(
-                            egui::TextEdit::singleline(&mut proxy.username)
-                                .desired_width(250.0)
+                            egui::TextEdit::singleline(&mut proxy.password)
+                                .desired_width(pw_width)
                                 .margin(egui::vec2(8.0, 4.0))
                                 .hint_text("optional"),
                         );
-                        ui.end_row();
-
-                        ui.label(
-                            RichText::new("Password")
-                                .size(12.0)
-                                .color(super::TEXT_SECONDARY),
+                    } else {
+                        let mut masked = proxy.password.clone();
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut masked)
+                                .password(true)
+                                .desired_width(pw_width)
+                                .margin(egui::vec2(8.0, 4.0)),
                         );
-                        ui.horizontal(|ui| {
-                            if show_password {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut proxy.password)
-                                        .desired_width(200.0)
-                                        .margin(egui::vec2(8.0, 4.0))
-                                        .hint_text("optional"),
-                                );
-                            } else {
-                                let mut masked = proxy.password.clone();
-                                let resp = ui.add(
-                                    egui::TextEdit::singleline(&mut masked)
-                                        .password(true)
-                                        .desired_width(200.0)
-                                        .margin(egui::vec2(8.0, 4.0)),
-                                );
-                                if resp.changed() {
-                                    proxy.password = masked;
-                                }
-                            }
-                            let toggle_text =
-                                if show_password { "Hide" } else { "Show" };
-                            if ui
-                                .button(
-                                    RichText::new(toggle_text)
-                                        .size(11.0)
-                                        .color(super::ACCENT),
-                                )
-                                .clicked()
-                            {
-                                show_password = !show_password;
-                            }
-                        });
-                        ui.end_row();
-                    });
+                        if resp.changed() {
+                            proxy.password = masked;
+                        }
+                    }
+                    let toggle_text =
+                        if show_password { "Hide" } else { "Show" };
+                    if ui
+                        .button(
+                            RichText::new(toggle_text)
+                                .size(11.0)
+                                .color(super::ACCENT),
+                        )
+                        .clicked()
+                    {
+                        show_password = !show_password;
+                    }
+                });
             });
         });
 
@@ -347,6 +350,32 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
         if save_btn.clicked() {
             state.needs_save = true;
         }
+
+        // Spacer to push delete to the right
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let del_btn = ui.add_sized(
+                btn_size,
+                egui::Button::new(
+                    RichText::new("Delete")
+                        .size(12.0)
+                        .color(super::COLOR_FAILED),
+                ),
+            );
+            if del_btn.clicked() {
+                let was_active = state.data.active_proxy_id.as_ref() == Some(&proxy_id.to_string());
+                state.data.proxies.retain(|p| p.id != proxy_id);
+                if was_active {
+                    state.data.active_proxy_id = None;
+                }
+                if state.selected_proxy_id.as_ref().map(|s| s.as_str()) == Some(proxy_id) {
+                    state.selected_proxy_id = None;
+                }
+                state.needs_save = true;
+                if was_active {
+                    state.apply_proxy();
+                }
+            }
+        });
     });
 }
 

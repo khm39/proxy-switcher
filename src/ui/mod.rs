@@ -2,42 +2,42 @@ pub mod detail;
 pub mod proxy_list;
 
 // ---------------------------------------------------------------------------
-// Modern color palette (dark theme)
+// Modern color palette (dark theme — neutral gray base)
 // ---------------------------------------------------------------------------
 
-// Background layers
-pub const BG_DARKEST: egui::Color32 = egui::Color32::from_rgb(15, 17, 23);      // #0f1117
-pub const BG_DARK: egui::Color32 = egui::Color32::from_rgb(22, 25, 35);         // #161923
-pub const BG_MID: egui::Color32 = egui::Color32::from_rgb(30, 34, 46);          // #1e222e
-pub const BG_ELEVATED: egui::Color32 = egui::Color32::from_rgb(40, 45, 60);     // #282d3c
+// Background layers (neutral grays, no blue tint)
+pub const BG_DARKEST: egui::Color32 = egui::Color32::from_rgb(18, 18, 18);      // #121212
+pub const BG_DARK: egui::Color32 = egui::Color32::from_rgb(24, 24, 24);         // #181818
+pub const BG_MID: egui::Color32 = egui::Color32::from_rgb(32, 32, 32);          // #202020
+pub const BG_ELEVATED: egui::Color32 = egui::Color32::from_rgb(44, 44, 44);     // #2c2c2c
 
-// Accent
-pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(99, 102, 241);        // #6366f1 indigo
-pub const ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(129, 131, 248); // #8183f8
-pub const ACCENT_DIM: egui::Color32 = egui::Color32::from_rgb(67, 69, 170);     // #4345aa
+// Accent (blue-gray, subtle)
+pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(100, 140, 200);       // #648cc8
+pub const ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(130, 165, 220); // #82a5dc
+pub const ACCENT_DIM: egui::Color32 = egui::Color32::from_rgb(60, 90, 140);     // #3c5a8c
 
-// Text — higher contrast for accessibility (WCAG AA on dark backgrounds)
-pub const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(240, 244, 248);  // #f0f4f8
-pub const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(176, 190, 206);// #b0bece
-pub const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(140, 155, 175);    // #8c9baf
+// Text — high contrast on neutral gray backgrounds (WCAG AA)
+pub const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(230, 230, 230);  // #e6e6e6
+pub const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(170, 170, 170);// #aaaaaa
+pub const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(120, 120, 120);    // #787878
 
-// Status colors — brighter for readability on dark backgrounds
-pub const COLOR_IDLE: egui::Color32 = egui::Color32::from_rgb(140, 155, 175);   // #8c9baf
-pub const COLOR_TESTING: egui::Color32 = egui::Color32::from_rgb(253, 224, 71);  // #fde047
-pub const COLOR_SUCCESS: egui::Color32 = egui::Color32::from_rgb(74, 222, 170);  // #4adea a
-pub const COLOR_FAILED: egui::Color32 = egui::Color32::from_rgb(252, 141, 156);  // #fc8d9c
+// Status colors
+pub const COLOR_IDLE: egui::Color32 = egui::Color32::from_rgb(120, 120, 120);   // #787878
+pub const COLOR_TESTING: egui::Color32 = egui::Color32::from_rgb(240, 200, 60);  // #f0c83c
+pub const COLOR_SUCCESS: egui::Color32 = egui::Color32::from_rgb(72, 200, 140);  // #48c88c
+pub const COLOR_FAILED: egui::Color32 = egui::Color32::from_rgb(230, 100, 100);  // #e66464
 
-// Badge colors — slightly brighter for contrast
-pub const BADGE_HTTP: egui::Color32 = egui::Color32::from_rgb(96, 205, 255);    // #60cdff
-pub const BADGE_SOCKS: egui::Color32 = egui::Color32::from_rgb(192, 120, 255);  // #c078ff
+// Badge colors
+pub const BADGE_HTTP: egui::Color32 = egui::Color32::from_rgb(80, 180, 230);    // #50b4e6
+pub const BADGE_SOCKS: egui::Color32 = egui::Color32::from_rgb(170, 110, 220);  // #aa6edc
 
-// Border / separator — slightly lighter for visibility
-pub const BORDER: egui::Color32 = egui::Color32::from_rgb(55, 62, 80);          // #373e50
+// Border / separator (neutral gray)
+pub const BORDER: egui::Color32 = egui::Color32::from_rgb(56, 56, 56);          // #383838
 
 // Input field background (shared by TextEdit, DragValue, ComboBox)
-pub const INPUT_BG: egui::Color32 = egui::Color32::from_rgb(20, 23, 32);        // #141720
-pub const INPUT_BORDER: egui::Color32 = egui::Color32::from_rgb(65, 72, 92);    // #41485c
-pub const INPUT_BORDER_FOCUS: egui::Color32 = egui::Color32::from_rgb(99, 102, 241); // same as ACCENT
+pub const INPUT_BG: egui::Color32 = egui::Color32::from_rgb(20, 20, 20);        // #141414
+pub const INPUT_BORDER: egui::Color32 = egui::Color32::from_rgb(64, 64, 64);    // #404040
+pub const INPUT_BORDER_FOCUS: egui::Color32 = egui::Color32::from_rgb(100, 140, 200); // same as ACCENT
 
 /// Apply modern dark theme to egui visuals.
 pub fn apply_theme(ctx: &egui::Context) {
@@ -61,8 +61,8 @@ pub fn apply_theme(ctx: &egui::Context) {
     visuals.widgets.inactive.expansion = 0.0;
 
     // --- Hovered widgets ---
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(50, 55, 75);
-    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(45, 50, 68);
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(55, 55, 55);
+    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(50, 50, 50);
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, ACCENT);
     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
     visuals.widgets.hovered.rounding = rounding;
