@@ -202,8 +202,10 @@ impl Default for ProxyStatus {
 // ---------------------------------------------------------------------------
 
 /// Parse "IP/prefix" (e.g. "172.29.0.1/24") or plain IP (defaults to /24).
-fn parse_tun_cidr(input: &str) -> Result<(Ipv4Addr, u8), String> {
-    if let Some((ip_str, prefix_str)) = input.split_once('/') {
+/// Returns (local_ip, prefix, gateway_ip).
+/// The gateway IP is automatically derived as local_ip + 1 (e.g. .1 → .2).
+fn parse_tun_cidr(input: &str) -> Result<(Ipv4Addr, u8, Ipv4Addr), String> {
+    let (ip, prefix) = if let Some((ip_str, prefix_str)) = input.split_once('/') {
         let ip: Ipv4Addr = ip_str
             .trim()
             .parse()
@@ -215,14 +217,22 @@ fn parse_tun_cidr(input: &str) -> Result<(Ipv4Addr, u8), String> {
         if prefix > 32 {
             return Err(format!("Prefix length {} exceeds 32", prefix));
         }
-        Ok((ip, prefix))
+        (ip, prefix)
     } else {
         let ip: Ipv4Addr = input
             .trim()
             .parse()
             .map_err(|e| format!("Invalid TUN IP '{}': {}", input, e))?;
-        Ok((ip, 24))
-    }
+        (ip, 24)
+    };
+
+    // Derive gateway: local IP + 1 (e.g. 172.29.0.1 → 172.29.0.2)
+    let ip_u32 = u32::from(ip);
+    let gw_u32 = ip_u32.checked_add(1)
+        .ok_or_else(|| format!("Cannot derive gateway from {}", ip))?;
+    let gateway = Ipv4Addr::from(gw_u32);
+
+    Ok((ip, prefix, gateway))
 }
 
 // ---------------------------------------------------------------------------
@@ -230,15 +240,15 @@ fn parse_tun_cidr(input: &str) -> Result<(Ipv4Addr, u8), String> {
 // ---------------------------------------------------------------------------
 
 fn create_tun_device(tun_addr: &str) -> Result<tun_rs::AsyncDevice, String> {
-    let (ip, prefix) = parse_tun_cidr(tun_addr)?;
-    log::info!("Creating TUN device: name={}, addr={}/{}, mtu={}",
-        TUN_NAME, ip, prefix, TUN_MTU);
+    let (ip, prefix, gateway) = parse_tun_cidr(tun_addr)?;
+    log::info!("Creating TUN device: name={}, addr={}/{}, gateway={}, mtu={}",
+        TUN_NAME, ip, prefix, gateway, TUN_MTU);
     log::info!("Platform: {}, Arch: {}", std::env::consts::OS, std::env::consts::ARCH);
 
     let mut builder = tun_rs::DeviceBuilder::new();
     builder = builder
         .name(TUN_NAME)
-        .ipv4(ip, prefix, None)
+        .ipv4(ip, prefix, Some(gateway))
         .mtu(TUN_MTU);
 
     #[cfg(target_os = "windows")]
@@ -839,7 +849,7 @@ mod linux_route {
 // ---- Common route management ----
 
 #[allow(unused_variables)]
-fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
+fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<(), String> {
     let upstream_ip = resolve_to_ipv4(upstream_host)?;
     log::info!("Adding routes (upstream={} -> {})", upstream_host, upstream_ip);
 
@@ -896,13 +906,17 @@ fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let tun_ip: Ipv4Addr = tun_addr.parse().map_err(|e| format!("Invalid TUN address: {e}"))?;
+        let tun_gw: Ipv4Addr = tun_gw_addr.parse().map_err(|e| format!("Invalid TUN gateway: {e}"))?;
+        log::info!("TUN local={}, gateway={}", tun_ip, tun_gw);
 
         // Step 0: Clean up stale TUN routes from previous runs
-        // Match by gateway=TUN_IP (old style) or by known split-route patterns on TUN interface
+        // Match by gateway=TUN_GW (routes use the gateway IP as next hop)
         if let Ok(stale_snap) = win_route::RouteTable::read() {
-            let tun_nbo = win_route::ip_to_nbo(tun_ip);
+            let tun_gw_nbo = win_route::ip_to_nbo(tun_gw);
+            let tun_ip_nbo = win_route::ip_to_nbo(tun_ip);
             for entry in stale_snap.entries() {
-                if entry.dwForwardNextHop == tun_nbo {
+                // Match routes via TUN gateway or TUN IP (legacy cleanup)
+                if entry.dwForwardNextHop == tun_gw_nbo || entry.dwForwardNextHop == tun_ip_nbo {
                     let dest = win_route::nbo_to_ip(entry.dwForwardDest);
                     let mask = win_route::nbo_to_ip(entry.dwForwardMask);
                     log::info!("Cleaning stale TUN route: {}/{} if={}", dest, mask, entry.dwForwardIfIndex);
@@ -957,16 +971,17 @@ fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
         }
 
         // Step 4: Split default routes via TUN (0.0.0.0/1 + 128.0.0.0/1)
-        // On-link (DIRECT): next hop = TUN interface's own IP.
-        // Windows requires a valid next hop even for on-link routes.
-        let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
+        // Next hop = TUN gateway IP (e.g. 172.29.0.2), NOT TUN's own IP.
+        // Windows requires next hop to be a reachable remote host on the interface subnet.
+        // Using the interface's own IP as gateway causes error 160 (BAD_ARGUMENTS).
+        let tun_gw_nbo = win_route::ip_to_nbo(tun_gw);
         win_route::create_route(
             Ipv4Addr::new(0, 0, 0, 0),
             Ipv4Addr::new(128, 0, 0, 0),
             tun_gw_nbo,
             tun_if_idx,
             1,
-            true, // on-link (DIRECT)
+            false, // indirect: via TUN gateway
         )?;
         win_route::create_route(
             Ipv4Addr::new(128, 0, 0, 0),
@@ -974,7 +989,7 @@ fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
             tun_gw_nbo,
             tun_if_idx,
             1,
-            true, // on-link (DIRECT)
+            false, // indirect: via TUN gateway
         )?;
 
         // Step 5: Verify
@@ -992,7 +1007,7 @@ fn add_routes(upstream_host: &str, tun_addr: &str) -> Result<(), String> {
 }
 
 #[allow(unused_variables)]
-fn remove_routes(upstream_host: &str, tun_addr: &str) {
+fn remove_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) {
     let upstream_ip = match resolve_to_ipv4(upstream_host) {
         Ok(ip) => ip,
         Err(e) => {
@@ -1026,11 +1041,12 @@ fn remove_routes(upstream_host: &str, tun_addr: &str) {
 
     #[cfg(target_os = "windows")]
     {
-        let tun_ip: Ipv4Addr = tun_addr.parse().unwrap_or(Ipv4Addr::new(198, 18, 0, 1));
+        let tun_ip: Ipv4Addr = tun_addr.parse().unwrap_or(Ipv4Addr::new(172, 29, 0, 1));
+        let tun_gw: Ipv4Addr = tun_gw_addr.parse().unwrap_or(Ipv4Addr::new(172, 29, 0, 2));
 
-        // Remove TUN split routes (on-link: gateway = TUN IP)
+        // Remove TUN split routes (gateway = TUN gateway IP)
         if let Some(tun_if_idx) = win_route::find_if_index_by_ip(tun_ip) {
-            let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
+            let tun_gw_nbo = win_route::ip_to_nbo(tun_gw);
             win_route::delete_route(
                 Ipv4Addr::new(0, 0, 0, 0),
                 Ipv4Addr::new(128, 0, 0, 0),
@@ -1196,14 +1212,15 @@ pub fn start(
     ctx: egui::Context,
     tun_addr: &str,
 ) -> Result<ProxyHandle, String> {
-    let (tun_ip, prefix) = parse_tun_cidr(tun_addr)?;
+    let (tun_ip, prefix, tun_gw) = parse_tun_cidr(tun_addr)?;
     let tun_ip_str = tun_ip.to_string();
+    let tun_gw_str = tun_gw.to_string();
 
     let tun_device = create_tun_device(tun_addr)?;
-    add_routes(&config.host, &tun_ip_str)?;
+    add_routes(&config.host, &tun_ip_str, &tun_gw_str)?;
 
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-    let listen_info = format!("TUN {} ({}/{})", TUN_NAME, tun_ip, prefix);
+    let listen_info = format!("TUN {} ({}/{} gw {})", TUN_NAME, tun_ip, prefix, tun_gw);
     let upstream_host = config.host.clone();
 
     {
@@ -1214,7 +1231,7 @@ pub fn start(
     }
     ctx.request_repaint();
 
-    rt.spawn(proxy_loop(tun_device, config, shutdown_rx, status, ctx, upstream_host, tun_ip_str));
+    rt.spawn(proxy_loop(tun_device, config, shutdown_rx, status, ctx, upstream_host, tun_ip_str, tun_gw_str));
 
     Ok(ProxyHandle { shutdown_tx })
 }
@@ -1227,6 +1244,7 @@ async fn proxy_loop(
     ctx: egui::Context,
     upstream_host: String,
     tun_addr: String,
+    tun_gw_addr: String,
 ) {
     let tun = Arc::new(tun_device);
     let config = Arc::new(config);
@@ -1467,7 +1485,7 @@ async fn proxy_loop(
     }
 
     // Cleanup
-    remove_routes(&upstream_host, &tun_addr);
+    remove_routes(&upstream_host, &tun_addr, &tun_gw_addr);
     {
         let mut s = status.lock().unwrap();
         s.running = false;
@@ -1565,23 +1583,26 @@ mod tests {
 
     #[test]
     fn parse_tun_cidr_with_prefix() {
-        let (ip, prefix) = parse_tun_cidr("172.29.0.1/24").unwrap();
+        let (ip, prefix, gw) = parse_tun_cidr("172.29.0.1/24").unwrap();
         assert_eq!(ip, Ipv4Addr::new(172, 29, 0, 1));
         assert_eq!(prefix, 24);
+        assert_eq!(gw, Ipv4Addr::new(172, 29, 0, 2)); // auto-derived gateway
     }
 
     #[test]
     fn parse_tun_cidr_without_prefix() {
-        let (ip, prefix) = parse_tun_cidr("10.0.85.1").unwrap();
+        let (ip, prefix, gw) = parse_tun_cidr("10.0.85.1").unwrap();
         assert_eq!(ip, Ipv4Addr::new(10, 0, 85, 1));
         assert_eq!(prefix, 24); // default
+        assert_eq!(gw, Ipv4Addr::new(10, 0, 85, 2));
     }
 
     #[test]
     fn parse_tun_cidr_narrow_prefix() {
-        let (ip, prefix) = parse_tun_cidr("172.29.0.1/30").unwrap();
+        let (ip, prefix, gw) = parse_tun_cidr("172.29.0.1/30").unwrap();
         assert_eq!(ip, Ipv4Addr::new(172, 29, 0, 1));
         assert_eq!(prefix, 30);
+        assert_eq!(gw, Ipv4Addr::new(172, 29, 0, 2));
     }
 
     #[test]
