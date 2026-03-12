@@ -14,12 +14,13 @@ fn config_path() -> Option<PathBuf> {
 }
 
 /// Load `AppData` from disk. Returns `AppData::default()` on any error.
+/// Supports legacy profile-based config format via `parse_config()`.
 pub fn load() -> AppData {
     let Some(path) = config_path() else {
         return AppData::default();
     };
     match fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_else(|e| {
+        Ok(json) => crate::models::parse_config(&json).unwrap_or_else(|e| {
             eprintln!("Failed to parse config: {e}");
             AppData::default()
         }),

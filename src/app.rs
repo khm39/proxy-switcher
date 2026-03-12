@@ -9,7 +9,6 @@ pub struct AppState {
     pub rt: Arc<tokio::runtime::Runtime>,
 
     // Selection state
-    pub selected_profile_id: Option<String>,
     pub selected_proxy_id: Option<String>,
 
     // Detail panel
@@ -31,16 +30,17 @@ pub struct AppState {
 
     // egui context for repaint requests
     pub egui_ctx: Option<egui::Context>,
+
+    // Track whether theme has been applied
+    pub theme_applied: bool,
 }
 
 impl AppState {
     pub fn new(rt: Arc<tokio::runtime::Runtime>) -> Self {
         let data = crate::storage::load();
-        let selected_profile_id = data.active_profile_id.clone();
         Self {
             data,
             rt,
-            selected_profile_id,
             selected_proxy_id: None,
             detail_tab: DetailTab::Basic,
             show_password: false,
@@ -50,6 +50,7 @@ impl AppState {
             needs_save: false,
             save_error: None,
             egui_ctx: None,
+            theme_applied: false,
         }
     }
 
@@ -61,11 +62,8 @@ impl AppState {
                 TestStatus::Testing => {} // still running
                 _ => {
                     let pid = proxy_id.clone();
-                    for profile in &mut self.data.profiles {
-                        if let Some(proxy) = profile.proxies.iter_mut().find(|p| p.id == pid) {
-                            proxy.test_status = status;
-                            break;
-                        }
+                    if let Some(proxy) = self.data.proxies.iter_mut().find(|p| p.id == pid) {
+                        proxy.test_status = status;
                     }
                     self.pending_test = None;
                 }
@@ -74,7 +72,6 @@ impl AppState {
     }
 
     /// Start or restart the transparent proxy with the active proxy config.
-    /// If no active proxy, stops the proxy.
     pub fn apply_proxy(&mut self) {
         log::info!("apply_proxy() called");
 
@@ -84,11 +81,7 @@ impl AppState {
             handle.stop();
         }
 
-        let proxy = self
-            .data
-            .active_profile()
-            .and_then(|p| p.active_proxy())
-            .cloned();
+        let proxy = self.data.active_proxy().cloned();
 
         let Some(proxy) = proxy else {
             log::info!("No active proxy configured");
@@ -160,6 +153,12 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Apply theme once
+        if !self.state.theme_applied {
+            crate::ui::apply_theme(ctx);
+            self.state.theme_applied = true;
+        }
+
         // Store egui context for repaint requests
         if self.state.egui_ctx.is_none() {
             self.state.egui_ctx = Some(ctx.clone());
@@ -168,49 +167,77 @@ impl eframe::App for App {
         // Poll async test results
         self.state.poll_test_result();
 
-        // Top panel: title bar + proxy status
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("PROXY MANAGER");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let status = self.state.proxy_status.lock().unwrap();
-                    if status.running {
-                        ui.label(
-                            egui::RichText::new(format!("TUN PROXY [ON] {}", status.tun_addr))
-                                .color(crate::ui::COLOR_SUCCESS),
-                        );
-                        ui.label(
-                            egui::RichText::new(format!("({} conns)", status.connections))
-                                .small()
-                                .color(egui::Color32::GRAY),
-                        );
-                    } else {
-                        ui.label(
-                            egui::RichText::new("TUN PROXY [OFF]")
-                                .color(crate::ui::COLOR_IDLE),
-                        );
-                    }
-                    if let Some(err) = &status.error {
-                        ui.colored_label(crate::ui::COLOR_FAILED, err.as_str());
-                    }
+        // Top panel: title + proxy status
+        egui::TopBottomPanel::top("top_bar")
+            .frame(egui::Frame::none()
+                .fill(crate::ui::BG_DARKEST)
+                .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                .stroke(egui::Stroke::new(1.0, crate::ui::BORDER)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Proxy Manager")
+                            .size(20.0)
+                            .strong()
+                            .color(crate::ui::TEXT_PRIMARY),
+                    );
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("v0.1")
+                            .size(13.0)
+                            .color(crate::ui::TEXT_MUTED),
+                    );
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let status = self.state.proxy_status.lock().unwrap();
+                        if status.running {
+                            let pill = egui::RichText::new(format!("  ON  {}  ", status.tun_addr))
+                                .size(13.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(18, 18, 18));
+                            ui.label(pill.background_color(crate::ui::COLOR_SUCCESS));
+
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(format!("{} conn", status.connections))
+                                    .size(13.0)
+                                    .color(crate::ui::TEXT_MUTED),
+                            );
+                        } else {
+                            let pill = egui::RichText::new("  OFF  ")
+                                .size(13.0)
+                                .strong()
+                                .color(crate::ui::TEXT_MUTED);
+                            ui.label(pill.background_color(crate::ui::BG_ELEVATED));
+                        }
+                        if let Some(err) = &status.error {
+                            ui.label(
+                                egui::RichText::new(err.as_str())
+                                    .size(13.0)
+                                    .color(crate::ui::COLOR_FAILED),
+                            );
+                        }
+                    });
                 });
+
+                if let Some(err) = &self.state.save_error {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("Save error: {err}"))
+                            .size(13.0)
+                            .color(crate::ui::COLOR_FAILED),
+                    );
+                }
             });
 
-            // Show save error if any
-            if let Some(err) = &self.state.save_error {
-                ui.colored_label(
-                    crate::ui::COLOR_FAILED,
-                    format!("Save error: {err}"),
-                );
-            }
-        });
-
-        // Main area: 3-pane layout rendered via nested panels
-        egui::CentralPanel::default().show(ctx, |ui| {
-            crate::ui::sidebar::render(ui, &mut self.state);
-            crate::ui::proxy_list::render(ui, &mut self.state);
-            crate::ui::detail::render(ui, &mut self.state);
-        });
+        // Main area: 2-pane layout (proxy list + detail)
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(crate::ui::BG_DARK))
+            .show(ctx, |ui| {
+                crate::ui::proxy_list::render(ui, &mut self.state);
+                crate::ui::detail::render(ui, &mut self.state);
+            });
 
         // Auto-save when dirty
         if self.state.needs_save {
@@ -219,7 +246,6 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Stop the transparent proxy
         if let Some(handle) = self.state.proxy_handle.take() {
             handle.stop();
         }

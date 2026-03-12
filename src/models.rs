@@ -168,42 +168,13 @@ impl Proxy {
 }
 
 // ---------------------------------------------------------------------------
-// Profile
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Profile {
-    pub id: String,
-    pub name: String,
-    pub proxies: Vec<Proxy>,
-    pub active_proxy_id: Option<String>,
-}
-
-impl Profile {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.into(),
-            proxies: Vec::new(),
-            active_proxy_id: None,
-        }
-    }
-
-    pub fn active_proxy(&self) -> Option<&Proxy> {
-        self.active_proxy_id
-            .as_ref()
-            .and_then(|id| self.proxies.iter().find(|p| &p.id == id))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // AppData  (persistence root)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppData {
-    pub profiles: Vec<Profile>,
-    pub active_profile_id: Option<String>,
+    pub proxies: Vec<Proxy>,
+    pub active_proxy_id: Option<String>,
     #[serde(default = "default_tun_addr")]
     pub tun_addr: String,
 }
@@ -214,29 +185,74 @@ fn default_tun_addr() -> String {
 
 impl Default for AppData {
     fn default() -> Self {
-        let default_profile = Profile::new("Default");
-        let id = default_profile.id.clone();
         Self {
-            profiles: vec![default_profile],
-            active_profile_id: Some(id),
+            proxies: Vec::new(),
+            active_proxy_id: None,
             tun_addr: default_tun_addr(),
         }
     }
 }
 
 impl AppData {
-    pub fn active_profile(&self) -> Option<&Profile> {
-        self.active_profile_id
+    pub fn active_proxy(&self) -> Option<&Proxy> {
+        self.active_proxy_id
             .as_ref()
-            .and_then(|id| self.profiles.iter().find(|p| &p.id == id))
+            .and_then(|id| self.proxies.iter().find(|p| &p.id == id))
     }
+}
 
-    pub fn active_profile_mut(&mut self) -> Option<&mut Profile> {
-        self.active_profile_id
-            .as_ref()
-            .cloned()
-            .and_then(move |id| self.profiles.iter_mut().find(|p| p.id == id))
+// ---------------------------------------------------------------------------
+// Legacy format migration
+// ---------------------------------------------------------------------------
+
+/// Old config format that used profiles.
+#[derive(Deserialize)]
+struct LegacyAppData {
+    profiles: Vec<LegacyProfile>,
+    #[serde(default)]
+    active_profile_id: Option<String>,
+    #[serde(default = "default_tun_addr")]
+    tun_addr: String,
+}
+
+#[derive(Deserialize)]
+struct LegacyProfile {
+    #[serde(default)]
+    proxies: Vec<Proxy>,
+    #[serde(default)]
+    active_proxy_id: Option<String>,
+}
+
+/// Try to parse as new flat format first; fall back to legacy profile format.
+pub fn parse_config(json: &str) -> Result<AppData, String> {
+    // Try new format
+    if let Ok(data) = serde_json::from_str::<AppData>(json) {
+        return Ok(data);
     }
+    // Try legacy profile format
+    if let Ok(legacy) = serde_json::from_str::<LegacyAppData>(json) {
+        let mut proxies = Vec::new();
+        let mut active_proxy_id = None;
+        // Find active profile and merge all proxies
+        for profile in &legacy.profiles {
+            let is_active = legacy.active_profile_id.as_ref()
+                .map_or(false, |_aid| legacy.profiles.iter()
+                    .position(|p| std::ptr::eq(p, profile))
+                    .map_or(false, |_| true));
+            proxies.extend(profile.proxies.iter().cloned());
+            if is_active || active_proxy_id.is_none() {
+                if let Some(ref id) = profile.active_proxy_id {
+                    active_proxy_id = Some(id.clone());
+                }
+            }
+        }
+        return Ok(AppData {
+            proxies,
+            active_proxy_id,
+            tun_addr: legacy.tun_addr,
+        });
+    }
+    Err("Failed to parse config".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -330,35 +346,23 @@ mod tests {
     }
 
     #[test]
-    fn profile_active_proxy() {
-        let mut profile = Profile::new("Test");
+    fn app_data_default_is_empty() {
+        let data = AppData::default();
+        assert!(data.proxies.is_empty());
+        assert!(data.active_proxy_id.is_none());
+    }
+
+    #[test]
+    fn app_data_active_proxy() {
+        let mut data = AppData::default();
         let proxy = Proxy::default();
         let pid = proxy.id.clone();
-        profile.proxies.push(proxy);
-        assert!(profile.active_proxy().is_none());
+        data.proxies.push(proxy);
+        assert!(data.active_proxy().is_none());
 
-        profile.active_proxy_id = Some(pid.clone());
-        let active = profile.active_proxy().unwrap();
+        data.active_proxy_id = Some(pid.clone());
+        let active = data.active_proxy().unwrap();
         assert_eq!(active.id, pid);
-    }
-
-    #[test]
-    fn app_data_default_has_one_profile() {
-        let data = AppData::default();
-        assert_eq!(data.profiles.len(), 1);
-        assert!(data.active_profile_id.is_some());
-        assert!(data.active_profile().is_some());
-    }
-
-    #[test]
-    fn app_data_active_profile_mut() {
-        let mut data = AppData::default();
-        let name = {
-            let p = data.active_profile_mut().unwrap();
-            p.name = "Changed".to_string();
-            p.name.clone()
-        };
-        assert_eq!(data.active_profile().unwrap().name, name);
     }
 
     #[test]
@@ -389,14 +393,32 @@ mod tests {
             ports: vec![80, 443],
             raw_input: "80, 443".to_string(),
         };
-        data.profiles[0].proxies.push(proxy);
+        data.proxies.push(proxy);
 
         let json = serde_json::to_string_pretty(&data).unwrap();
         let restored: AppData = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(restored.profiles.len(), 1);
-        assert_eq!(restored.profiles[0].proxies.len(), 1);
-        assert_eq!(restored.profiles[0].proxies[0].name, "Corp Proxy");
-        assert_eq!(restored.profiles[0].proxies[0].port_filter.ports, vec![80, 443]);
+        assert_eq!(restored.proxies.len(), 1);
+        assert_eq!(restored.proxies[0].name, "Corp Proxy");
+        assert_eq!(restored.proxies[0].port_filter.ports, vec![80, 443]);
+    }
+
+    #[test]
+    fn parse_config_legacy_format() {
+        let legacy_json = r#"{
+            "profiles": [{
+                "id": "p1",
+                "name": "Default",
+                "proxies": [{"id":"x1","name":"Test","proxy_type":"Http","host":"h","port":80,"username":"","password":"","port_filter":{"enabled":false,"ports":[],"raw_input":""},"note":""}],
+                "active_proxy_id": "x1"
+            }],
+            "active_profile_id": "p1",
+            "tun_addr": "10.0.0.1/24"
+        }"#;
+        let data = parse_config(legacy_json).unwrap();
+        assert_eq!(data.proxies.len(), 1);
+        assert_eq!(data.proxies[0].name, "Test");
+        assert_eq!(data.active_proxy_id, Some("x1".to_string()));
+        assert_eq!(data.tun_addr, "10.0.0.1/24");
     }
 }
