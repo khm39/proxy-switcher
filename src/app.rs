@@ -1,4 +1,4 @@
-use crate::local_proxy::{self, ProxyHandle, ProxyStatus, UpstreamConfig};
+use crate::tun_proxy::{self, ProxyHandle, ProxyStatus, UpstreamConfig};
 use crate::models::{AppData, TestStatus};
 use crate::ui::detail::DetailTab;
 use std::sync::{Arc, Mutex};
@@ -115,7 +115,7 @@ impl AppState {
         let tun_addr = self.data.tun_addr.clone();
 
         log::info!("Starting local proxy...");
-        match local_proxy::start(&self.rt, config, self.proxy_status.clone(), ctx, &tun_addr) {
+        match tun_proxy::start(&self.rt, config, self.proxy_status.clone(), ctx, &tun_addr) {
             Ok(handle) => {
                 log::info!("Local proxy started successfully");
                 self.proxy_handle = Some(handle);

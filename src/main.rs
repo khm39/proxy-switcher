@@ -1,5 +1,5 @@
 mod app;
-mod local_proxy;
+mod tun_proxy;
 mod models;
 mod storage;
 mod tester;
