@@ -84,9 +84,16 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
                 ui.add_space(8.0);
 
-                // Add / Remove profile buttons
+                // Add / Remove profile buttons (same row)
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("+ Add").size(12.0)).clicked() {
+                    let half_w = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                    if ui
+                        .add_sized(
+                            [half_w, 24.0],
+                            egui::Button::new(RichText::new("+ Add").size(12.0)),
+                        )
+                        .clicked()
+                    {
                         let new_profile = crate::models::Profile::new(format!(
                             "Profile {}",
                             state.data.profiles.len() + 1
@@ -98,7 +105,14 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                         state.needs_save = true;
                     }
                     if ui
-                        .button(RichText::new("Remove").size(12.0).color(super::COLOR_FAILED))
+                        .add_sized(
+                            [half_w, 24.0],
+                            egui::Button::new(
+                                RichText::new("Remove")
+                                    .size(12.0)
+                                    .color(super::COLOR_FAILED),
+                            ),
+                        )
                         .clicked()
                     {
                         if let Some(sel_id) = state.selected_profile_id.clone() {
@@ -122,9 +136,12 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                     }
                 });
 
-                // Set active button
+                // Set active button (separate row, full width)
                 if ui
-                    .button(RichText::new("Set Active").size(12.0))
+                    .add_sized(
+                        [ui.available_width(), 24.0],
+                        egui::Button::new(RichText::new("Set Active").size(12.0)),
+                    )
                     .clicked()
                 {
                     if let Some(sel_id) = state.selected_profile_id.clone() {
@@ -156,11 +173,13 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
                 if let Some(profile) = state.data.active_profile() {
                     if let Some(proxy) = profile.active_proxy() {
+                        let card_width = ui.available_width();
                         egui::Frame::none()
                             .fill(super::BG_ELEVATED)
                             .rounding(egui::Rounding::same(6.0))
                             .inner_margin(egui::Margin::same(8.0))
                             .show(ui, |ui| {
+                                ui.set_min_width(card_width - 16.0);
                                 ui.label(
                                     RichText::new(&proxy.name)
                                         .size(13.0)

@@ -226,11 +226,22 @@ fn render_basic_tab(
                                 .size(12.0)
                                 .color(super::TEXT_SECONDARY),
                         );
-                        ui.add(
-                            egui::DragValue::new(&mut proxy.port)
-                                .clamp_range(1..=65535)
-                                .speed(1),
-                        );
+                        {
+                            let mut port_str = proxy.port.to_string();
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut port_str)
+                                    .desired_width(250.0)
+                                    .margin(egui::vec2(8.0, 4.0))
+                                    .hint_text("1-65535"),
+                            );
+                            if resp.changed() {
+                                if let Ok(p) = port_str.parse::<u16>() {
+                                    if p >= 1 {
+                                        proxy.port = p;
+                                    }
+                                }
+                            }
+                        }
                         ui.end_row();
 
                         // Username
@@ -317,31 +328,37 @@ fn render_basic_tab(
             .map(|p| matches!(p.test_status, TestStatus::Testing))
     }).unwrap_or(false);
 
+    let btn_size = egui::vec2(130.0, 30.0);
+
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+
         // Test connection button with animated spinner
         if testing {
             let dots = animated_dots(ui);
             let label = format!("Testing{dots}");
-            let btn = ui.add_enabled(
-                false,
-                egui::Button::new(
-                    RichText::new(label)
-                        .size(12.0)
-                        .color(super::COLOR_TESTING),
-                ),
-            );
+            let btn = ui.add_enabled_ui(false, |ui| {
+                ui.add_sized(
+                    btn_size,
+                    egui::Button::new(
+                        RichText::new(label)
+                            .size(12.0)
+                            .color(super::COLOR_TESTING),
+                    ),
+                )
+            });
             // Spinner circle next to button
             let spinner_rect = egui::Rect::from_min_size(
-                btn.rect.right_top() + egui::vec2(6.0, 4.0),
+                btn.response.rect.right_top() + egui::vec2(6.0, 8.0),
                 egui::vec2(14.0, 14.0),
             );
             draw_spinner(ui, spinner_rect);
-            // Keep repainting while testing
             ui.ctx().request_repaint();
         } else {
-            let test_btn = ui.add(egui::Button::new(
-                RichText::new("Test Connection").size(12.0),
-            ));
+            let test_btn = ui.add_sized(
+                btn_size,
+                egui::Button::new(RichText::new("Test Connection").size(12.0)),
+            );
             if test_btn.clicked() {
                 let status = Arc::new(Mutex::new(TestStatus::Testing));
                 state.pending_test = Some((proxy_id.to_string(), status.clone()));
@@ -350,11 +367,14 @@ fn render_basic_tab(
         }
 
         // Set as active button
-        let active_btn = ui.add(egui::Button::new(
-            RichText::new("Set as Active")
-                .size(12.0)
-                .color(super::ACCENT),
-        ));
+        let active_btn = ui.add_sized(
+            btn_size,
+            egui::Button::new(
+                RichText::new("Set as Active")
+                    .size(12.0)
+                    .color(super::ACCENT),
+            ),
+        );
         if active_btn.clicked() {
             if let Some(profile) = profile_id.as_ref().and_then(|pid| {
                 state.data.profiles.iter_mut().find(|p| &p.id == pid)
@@ -365,12 +385,11 @@ fn render_basic_tab(
             }
         }
 
-        ui.add_space(8.0);
-
         // Save button
-        let save_btn = ui.add(egui::Button::new(
-            RichText::new("Save").size(12.0),
-        ));
+        let save_btn = ui.add_sized(
+            btn_size,
+            egui::Button::new(RichText::new("Save").size(12.0)),
+        );
         if save_btn.clicked() {
             state.needs_save = true;
         }
