@@ -218,7 +218,24 @@ fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
         .ipv4(TUN_ADDR, TUN_CIDR_PREFIX, None)
         .mtu(TUN_MTU)
         .build_async()
-        .map_err(|e| format!("Failed to create TUN device: {e}"))
+        .map_err(|e| {
+            let msg = format!("{e}");
+            // Detect Wintun DLL load failure on Windows
+            if msg.contains("LoadLibrary") || msg.contains("wintun") {
+                format!(
+                    "Wintun driver not found. Please download wintun.dll from \
+                     https://www.wintun.net/ and place it next to the executable. \
+                     (Details: {e})"
+                )
+            } else if msg.contains("permission") || msg.contains("denied") || msg.contains("EPERM") {
+                format!(
+                    "Permission denied creating TUN device. \
+                     Run as Administrator (Windows) or root (Linux). (Details: {e})"
+                )
+            } else {
+                format!("Failed to create TUN device: {e}")
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
