@@ -24,7 +24,7 @@ use tokio::sync::broadcast;
 // Constants
 // ---------------------------------------------------------------------------
 
-const TUN_NAME: &str = "proxyswitch0";
+const TUN_NAME: &str = "ps0";
 const TUN_MTU: u16 = 1500;
 const SMOL_TCP_BUF: usize = 65535;
 
@@ -405,6 +405,14 @@ mod win_route {
     const MIB_IPROUTE_TYPE_DIRECT: u32 = 3;
     const MIB_IPROUTE_TYPE_INDIRECT: u32 = 4;
     const MIB_IPPROTO_NETMGMT: u32 = 3;
+    const AF_INET: u16 = 2;
+
+    /// NET_LUID is a union (u64). Only the Value member is needed.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct NET_LUID {
+        pub value: u64,
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default)]
@@ -463,6 +471,75 @@ mod win_route {
             pdwSize: *mut u32,
             bOrder: i32,
         ) -> u32;
+        fn ConvertInterfaceIndexToLuid(
+            InterfaceIndex: u32,
+            InterfaceLuid: *mut NET_LUID,
+        ) -> u32;
+    }
+
+    // MIB_IPINTERFACE_ROW (netioapi.h) — repr(C) layout matching the Windows SDK.
+    // We define all fields up to and including Metric; the remainder is padded.
+    // Reference: https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_ipinterface_row
+    #[repr(C)]
+    pub struct MIB_IPINTERFACE_ROW {
+        pub family: u16,                              //  0
+        _pad0: [u8; 6],                               //  2 (align InterfaceLuid to 8)
+        pub interface_luid: NET_LUID,                  //  8
+        pub interface_index: u32,                      // 16
+        pub max_reassembly_size: u32,                  // 20
+        pub interface_identifier: u64,                 // 24
+        pub min_router_advertisement_interval: u32,    // 32
+        pub max_router_advertisement_interval: u32,    // 36
+        pub advertising_enabled: u8,                   // 40
+        pub forwarding_enabled: u8,                    // 41
+        pub weak_host_send: u8,                        // 42
+        pub weak_host_receive: u8,                     // 43
+        pub use_automatic_metric: u8,                  // 44
+        pub use_neighbor_unreachability_detection: u8,  // 45
+        pub managed_address_configuration_supported: u8, // 46
+        pub other_stateful_configuration_supported: u8,  // 47
+        pub advertise_default_route: u8,               // 48
+        _pad1: [u8; 3],                                // 49 (align next i32 to 4)
+        pub router_discovery_behavior: i32,            // 52
+        pub dad_transmits: u32,                        // 56
+        pub base_reachable_time: u32,                  // 60
+        pub retransmit_time: u32,                      // 64
+        pub path_mtu_discovery_timeout: u32,           // 68
+        pub link_local_address_behavior: i32,          // 72
+        pub link_local_address_timeout: u32,           // 76
+        pub zone_indices: [u32; 16],                   // 80 (64 bytes)
+        pub site_id: u32,                              // 144
+        pub metric: u32,                               // 148
+        // Remaining fields (NlMtu, Connected, etc.) are not needed.
+        _tail: [u8; 20],                               // pad to ~172 bytes total
+    }
+
+    extern "system" {
+        fn GetIpInterfaceEntry(row: *mut MIB_IPINTERFACE_ROW) -> u32;
+        fn InitializeIpInterfaceEntry(row: *mut MIB_IPINTERFACE_ROW);
+    }
+
+    /// Query the interface metric for the given interface index via GetIpInterfaceEntry.
+    pub fn get_interface_metric(if_index: u32) -> Result<u32, String> {
+        unsafe {
+            let mut luid = NET_LUID::default();
+            let ret = ConvertInterfaceIndexToLuid(if_index, &mut luid);
+            if ret != NO_ERROR {
+                return Err(format!("ConvertInterfaceIndexToLuid({}): error {}", if_index, ret));
+            }
+
+            let mut row: MIB_IPINTERFACE_ROW = std::mem::zeroed();
+            InitializeIpInterfaceEntry(&mut row);
+            row.family = AF_INET;
+            row.interface_luid = luid;
+
+            let ret = GetIpInterfaceEntry(&mut row);
+            if ret != NO_ERROR {
+                return Err(format!("GetIpInterfaceEntry(if={}): error {}", if_index, ret));
+            }
+
+            Ok(row.metric)
+        }
     }
 
     pub fn ip_to_nbo(ip: Ipv4Addr) -> u32 {
@@ -925,14 +1002,9 @@ fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<
             }
         }
 
-        // Step 1: Read route table via GetIpForwardTable (after cleanup)
-        let snapshot = win_route::RouteTable::read()?;
-        snapshot.log_table();
-
-        // Step 2: Find original gateway & TUN interface index (via GetIpAddrTable)
+        // Step 1: Wait for TUN IP to register, then read route table.
         // The TUN device may need time to register its IP after creation.
         // Retry up to 3 seconds with 200ms intervals.
-        let original_gw = snapshot.find_original_default_gw(tun_ip);
         let mut tun_if_idx = None;
         for attempt in 0..15 {
             tun_if_idx = win_route::find_if_index_by_ip(tun_ip);
@@ -951,17 +1023,32 @@ fn add_routes(upstream_host: &str, tun_addr: &str, tun_gw_addr: &str) -> Result<
         let tun_if_idx = tun_if_idx
             .ok_or_else(|| "Cannot find TUN interface in IP address table after 3s".to_string())?;
 
-        // Step 2b: Re-read route table (TUN auto-routes should now exist) and get
-        // the interface metric. On Windows Vista+, CreateIpForwardEntry requires
-        // dwForwardMetric1 >= interface_metric, otherwise error 160 (BAD_ARGUMENTS).
+        // Step 2: Read route table and query interface metric via GetIpInterfaceEntry.
+        // On Windows Vista+, CreateIpForwardEntry requires dwForwardMetric1 >=
+        // interface_metric, otherwise error 160 (BAD_ARGUMENTS).
         let snapshot = win_route::RouteTable::read()?;
         snapshot.log_table();
-        let tun_if_metric = snapshot.entries()
-            .iter()
-            .find(|e| e.dwForwardIfIndex == tun_if_idx)
-            .map(|e| e.dwForwardMetric1)
-            .unwrap_or(261); // safe default if no existing routes found
-        log::info!("TUN interface metric: {} (if_idx={})", tun_if_metric, tun_if_idx);
+        let original_gw = snapshot.find_original_default_gw(tun_ip);
+        let tun_if_metric = match win_route::get_interface_metric(tun_if_idx) {
+            Ok(m) => {
+                log::info!("TUN interface metric from GetIpInterfaceEntry: {} (if_idx={})", m, tun_if_idx);
+                m
+            }
+            Err(e) => {
+                // Fallback: derive from existing route on the TUN interface
+                let fallback = snapshot.entries()
+                    .iter()
+                    .filter(|e| e.dwForwardIfIndex == tun_if_idx)
+                    .min_by_key(|e| e.dwForwardMetric1)
+                    .map(|e| e.dwForwardMetric1)
+                    .unwrap_or(0);
+                log::warn!(
+                    "GetIpInterfaceEntry failed ({}), using route-derived metric: {} (if_idx={})",
+                    e, fallback, tun_if_idx
+                );
+                fallback
+            }
+        };
 
         // Step 3: Host route for upstream proxy via original gateway (prevents routing loop)
         // Skip for loopback addresses — 127.0.0.0/8 already routes to loopback interface.
