@@ -229,7 +229,14 @@ fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
     {
         let dll_path = find_wintun_dll();
         match &dll_path {
-            Some(path) => log::info!("wintun.dll found: {}", path),
+            Some(path) => {
+                log::info!("wintun.dll found: {}", path);
+                // Log file size and PE architecture for diagnostics
+                if let Ok(meta) = std::fs::metadata(path) {
+                    log::info!("wintun.dll size: {} bytes", meta.len());
+                }
+                log_dll_arch(path);
+            }
             None => log::warn!("wintun.dll not found in any search path, using tun-rs default"),
         }
         if let Some(path) = dll_path {
@@ -253,7 +260,22 @@ fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
     result.map_err(|e| {
         let msg = format!("{e}");
         let debug_msg = format!("{e:?}");
-        if msg.contains("LoadLibrary") || msg.contains("wintun") || debug_msg.contains("LoadLibrary") {
+
+        if debug_msg.contains("193") && debug_msg.contains("LoadLibrary") {
+            // Windows error 193 = ERROR_BAD_EXE_FORMAT = architecture mismatch
+            let arch = std::env::consts::ARCH;
+            let need = match arch {
+                "x86_64" => "amd64",
+                "x86" => "x86",
+                "aarch64" => "arm64",
+                other => other,
+            };
+            format!(
+                "wintun.dll architecture mismatch! This app is {arch}, \
+                 use wintun/bin/{need}/wintun.dll from the Wintun ZIP. \
+                 Download: https://www.wintun.net/"
+            )
+        } else if msg.contains("LoadLibrary") || msg.contains("wintun") || debug_msg.contains("LoadLibrary") {
             format!(
                 "Wintun driver not found. Please download wintun.dll from \
                  https://www.wintun.net/ and place it next to the executable \
@@ -345,6 +367,61 @@ fn find_wintun_dll() -> Option<String> {
 
     log::warn!("wintun.dll not found anywhere");
     None
+}
+
+/// Read PE header to determine DLL architecture (x86/x64/ARM64).
+#[cfg(target_os = "windows")]
+fn log_dll_arch(path: &str) {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        log::warn!("Cannot open DLL for arch check: {path}");
+        return;
+    };
+    // Read DOS header: e_lfanew at offset 0x3C
+    let mut buf = [0u8; 4];
+    if f.seek(SeekFrom::Start(0x3C)).is_err() || f.read_exact(&mut buf).is_err() {
+        log::warn!("Cannot read PE offset from DLL");
+        return;
+    }
+    let pe_offset = u32::from_le_bytes(buf) as u64;
+    // Read PE signature + Machine field
+    if f.seek(SeekFrom::Start(pe_offset)).is_err() {
+        log::warn!("Cannot seek to PE header");
+        return;
+    }
+    let mut header = [0u8; 6];
+    if f.read_exact(&mut header).is_err() {
+        log::warn!("Cannot read PE header");
+        return;
+    }
+    // header[0..4] = "PE\0\0", header[4..6] = Machine
+    let machine = u16::from_le_bytes([header[4], header[5]]);
+    let arch_str = match machine {
+        0x014C => "x86 (32-bit)",
+        0x8664 => "x86_64 (64-bit)",
+        0xAA64 => "ARM64",
+        other => {
+            log::info!("wintun.dll PE Machine: 0x{:04X} (unknown)", other);
+            return;
+        }
+    };
+    let app_arch = std::env::consts::ARCH;
+    log::info!("wintun.dll architecture: {} (app is {})", arch_str, app_arch);
+
+    // Check mismatch
+    let matches = match (machine, app_arch) {
+        (0x8664, "x86_64") => true,
+        (0x014C, "x86") => true,
+        (0xAA64, "aarch64") => true,
+        _ => false,
+    };
+    if !matches {
+        log::error!(
+            "ARCHITECTURE MISMATCH: wintun.dll is {} but app is {}. \
+             Use the correct DLL from wintun/bin/",
+            arch_str, app_arch
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
