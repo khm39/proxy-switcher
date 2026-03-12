@@ -120,6 +120,23 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
         });
 }
 
+/// Render a field label with a red asterisk indicating it is required.
+fn required_label(ui: &mut Ui, text: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.label(
+            RichText::new(text)
+                .size(12.0)
+                .color(super::TEXT_SECONDARY),
+        );
+        ui.label(
+            RichText::new("*")
+                .size(12.0)
+                .color(super::COLOR_FAILED),
+        );
+    });
+}
+
 fn find_proxy_mut<'a>(state: &'a mut AppState, proxy_id: &str) -> Option<&'a mut crate::models::Proxy> {
     state.data.proxies.iter_mut().find(|p| p.id == proxy_id)
 }
@@ -140,25 +157,18 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
             super::input_field_scope(ui, |ui| {
                 let field_width = ui.available_width();
 
-                // Proxy Name
-                ui.label(
-                    RichText::new("Proxy Name")
-                        .size(12.0)
-                        .color(super::TEXT_SECONDARY),
-                );
+                // Proxy Name *
+                required_label(ui, "Proxy Name");
                 ui.add(
                     egui::TextEdit::singleline(&mut proxy.name)
                         .desired_width(field_width)
-                        .margin(egui::vec2(8.0, 4.0)),
+                        .margin(egui::vec2(8.0, 4.0))
+                        .hint_text("e.g. My Proxy"),
                 );
                 ui.add_space(8.0);
 
-                // Type
-                ui.label(
-                    RichText::new("Type")
-                        .size(12.0)
-                        .color(super::TEXT_SECONDARY),
-                );
+                // Type *
+                required_label(ui, "Type");
                 egui::ComboBox::from_id_source("proxy_type_combo")
                     .selected_text(
                         RichText::new(proxy.proxy_type.to_string())
@@ -177,12 +187,8 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                     });
                 ui.add_space(8.0);
 
-                // Host
-                ui.label(
-                    RichText::new("Host")
-                        .size(12.0)
-                        .color(super::TEXT_SECONDARY),
-                );
+                // Host *
+                required_label(ui, "Host");
                 ui.add(
                     egui::TextEdit::singleline(&mut proxy.host)
                         .desired_width(field_width)
@@ -191,19 +197,15 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 );
                 ui.add_space(8.0);
 
-                // Port
-                ui.label(
-                    RichText::new("Port")
-                        .size(12.0)
-                        .color(super::TEXT_SECONDARY),
-                );
+                // Port *
+                required_label(ui, "Port");
                 {
                     let mut port_str = proxy.port.to_string();
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut port_str)
                             .desired_width(field_width)
                             .margin(egui::vec2(8.0, 4.0))
-                            .hint_text("1-65535"),
+                            .hint_text("e.g. 8080"),
                     );
                     if resp.changed() {
                         if let Ok(p) = port_str.parse::<u16>() {
@@ -215,7 +217,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                 }
                 ui.add_space(8.0);
 
-                // Username
+                // Username (optional)
                 ui.label(
                     RichText::new("Username")
                         .size(12.0)
@@ -225,11 +227,11 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                     egui::TextEdit::singleline(&mut proxy.username)
                         .desired_width(field_width)
                         .margin(egui::vec2(8.0, 4.0))
-                        .hint_text("optional"),
+                        .hint_text("e.g. user01"),
                 );
                 ui.add_space(8.0);
 
-                // Password
+                // Password (optional)
                 ui.label(
                     RichText::new("Password")
                         .size(12.0)
@@ -242,7 +244,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                             egui::TextEdit::singleline(&mut proxy.password)
                                 .desired_width(pw_width)
                                 .margin(egui::vec2(8.0, 4.0))
-                                .hint_text("optional"),
+                                .hint_text("e.g. password123"),
                         );
                     } else {
                         let mut masked = proxy.password.clone();
@@ -250,7 +252,8 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                             egui::TextEdit::singleline(&mut masked)
                                 .password(true)
                                 .desired_width(pw_width)
-                                .margin(egui::vec2(8.0, 4.0)),
+                                .margin(egui::vec2(8.0, 4.0))
+                                .hint_text("e.g. password123"),
                         );
                         if resp.changed() {
                             proxy.password = masked;
