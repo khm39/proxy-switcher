@@ -392,6 +392,24 @@ mod win_route {
         pub table: [MIB_IPFORWARDROW; 1], // variable-length
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    pub struct MIB_IPADDRROW {
+        pub dwAddr: u32,
+        pub dwIndex: u32,
+        pub dwMask: u32,
+        pub dwBCastAddr: u32,
+        pub dwReasmSize: u32,
+        pub unused1: u16,
+        pub wType: u16,
+    }
+
+    #[repr(C)]
+    pub struct MIB_IPADDRTABLE {
+        pub dwNumEntries: u32,
+        pub table: [MIB_IPADDRROW; 1],
+    }
+
     #[link(name = "iphlpapi")]
     extern "system" {
         fn GetIpForwardTable(
@@ -401,6 +419,11 @@ mod win_route {
         ) -> u32;
         fn CreateIpForwardEntry(pRoute: *const MIB_IPFORWARDROW) -> u32;
         fn DeleteIpForwardEntry(pRoute: *const MIB_IPFORWARDROW) -> u32;
+        fn GetIpAddrTable(
+            pIpAddrTable: *mut MIB_IPADDRTABLE,
+            pdwSize: *mut u32,
+            bOrder: i32,
+        ) -> u32;
     }
 
     pub fn ip_to_nbo(ip: Ipv4Addr) -> u32 {
@@ -463,28 +486,6 @@ mod win_route {
             None
         }
 
-        /// Find the interface index of the TUN device by looking for its subnet route.
-        pub fn find_tun_if_index(&self, tun_ip: Ipv4Addr) -> Option<u32> {
-            let octets = tun_ip.octets();
-            let subnet = ip_to_nbo(Ipv4Addr::new(octets[0], octets[1], octets[2], 0));
-            let mask24 = ip_to_nbo(Ipv4Addr::new(255, 255, 255, 0));
-            for entry in self.entries() {
-                if entry.dwForwardDest == subnet && entry.dwForwardMask == mask24 {
-                    log::info!("TUN interface index: {} (from subnet route)", entry.dwForwardIfIndex);
-                    return Some(entry.dwForwardIfIndex);
-                }
-            }
-            // Fallback: look for any route whose nexthop is the TUN IP
-            let tun_nbo = ip_to_nbo(tun_ip);
-            for entry in self.entries() {
-                if entry.dwForwardNextHop == tun_nbo {
-                    log::info!("TUN interface index: {} (from nexthop match)", entry.dwForwardIfIndex);
-                    return Some(entry.dwForwardIfIndex);
-                }
-            }
-            None
-        }
-
         pub fn log_table(&self) {
             let entries = self.entries();
             log::info!("IP route table ({} entries):", entries.len());
@@ -501,6 +502,42 @@ mod win_route {
                 );
             }
         }
+    }
+
+    /// Find the interface index of the TUN device via GetIpAddrTable.
+    /// This queries the OS for which interface owns the given IP address — much more
+    /// reliable than searching the route table (which may contain stale entries).
+    pub fn find_if_index_by_ip(ip: Ipv4Addr) -> Option<u32> {
+        let target = ip_to_nbo(ip);
+        unsafe {
+            let mut size: u32 = 0;
+            let ret = GetIpAddrTable(std::ptr::null_mut(), &mut size, 0);
+            if ret != ERROR_INSUFFICIENT_BUFFER && ret != NO_ERROR {
+                log::error!("GetIpAddrTable size query: error {}", ret);
+                return None;
+            }
+            let mut buffer = vec![0u8; size as usize];
+            let table = buffer.as_mut_ptr() as *mut MIB_IPADDRTABLE;
+            let ret = GetIpAddrTable(table, &mut size, 0);
+            if ret != NO_ERROR {
+                log::error!("GetIpAddrTable: error {}", ret);
+                return None;
+            }
+            let num = (*table).dwNumEntries as usize;
+            let entries = std::slice::from_raw_parts(&(*table).table[0], num);
+            log::info!("IP address table ({} entries):", num);
+            for entry in entries {
+                let addr = nbo_to_ip(entry.dwAddr);
+                let mask = nbo_to_ip(entry.dwMask);
+                log::info!("  if={} addr={} mask={}", entry.dwIndex, addr, mask);
+                if entry.dwAddr == target {
+                    log::info!("  -> TUN interface index: {}", entry.dwIndex);
+                    return Some(entry.dwIndex);
+                }
+            }
+        }
+        log::warn!("No interface found with IP {}", ip);
+        None
     }
 
     pub fn create_route(
@@ -778,7 +815,11 @@ fn add_routes(upstream_host: &str) -> Result<(), String> {
         let gw = linux_route::find_default_gateway(TUN_NAME);
 
         // Step 2: Host route for upstream proxy via original gateway (prevents routing loop)
-        if let Some(ref gw_info) = gw {
+        // Skip for loopback addresses — they already have a more-specific 127.0.0.0/8 route.
+        let is_loopback = upstream_ip.octets()[0] == 127;
+        if is_loopback {
+            log::info!("Upstream {} is loopback, skipping host route", upstream_ip);
+        } else if let Some(ref gw_info) = gw {
             log::info!(
                 "Adding host route for upstream {} via {} dev {}",
                 upstream_ip,
@@ -826,14 +867,17 @@ fn add_routes(upstream_host: &str) -> Result<(), String> {
         let snapshot = win_route::RouteTable::read()?;
         snapshot.log_table();
 
-        // Step 2: Find original gateway & TUN interface index
+        // Step 2: Find original gateway & TUN interface index (via GetIpAddrTable)
         let original_gw = snapshot.find_original_default_gw(tun_ip);
-        let tun_if_idx = snapshot
-            .find_tun_if_index(tun_ip)
-            .ok_or_else(|| "Cannot find TUN interface index in route table".to_string())?;
+        let tun_if_idx = win_route::find_if_index_by_ip(tun_ip)
+            .ok_or_else(|| "Cannot find TUN interface in IP address table".to_string())?;
 
         // Step 3: Host route for upstream proxy via original gateway (prevents routing loop)
-        if let Some(gw_row) = &original_gw {
+        // Skip for loopback addresses — 127.0.0.0/8 already routes to loopback interface.
+        let is_loopback = upstream_ip.octets()[0] == 127;
+        if is_loopback {
+            log::info!("Upstream {} is loopback, skipping host route", upstream_ip);
+        } else if let Some(gw_row) = &original_gw {
             log::info!("Adding host route for upstream proxy {}", upstream_ip);
             win_route::create_route(
                 upstream_ip,
@@ -899,11 +943,14 @@ fn remove_routes(upstream_host: &str) {
             Ipv4Addr::new(128, 0, 0, 0),
             Some(TUN_NAME),
         );
-        linux_route::delete_route(
-            upstream_ip,
-            Ipv4Addr::new(255, 255, 255, 255),
-            None,
-        );
+        // Skip loopback — we never added a host route for it
+        if upstream_ip.octets()[0] != 127 {
+            linux_route::delete_route(
+                upstream_ip,
+                Ipv4Addr::new(255, 255, 255, 255),
+                None,
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -911,33 +958,35 @@ fn remove_routes(upstream_host: &str) {
         let tun_ip: Ipv4Addr = TUN_ADDR.parse().unwrap();
         let tun_gw_nbo = win_route::ip_to_nbo(tun_ip);
 
-        if let Ok(snapshot) = win_route::RouteTable::read() {
-            // Remove TUN split routes
-            if let Some(tun_if_idx) = snapshot.find_tun_if_index(tun_ip) {
-                win_route::delete_route(
-                    Ipv4Addr::new(0, 0, 0, 0),
-                    Ipv4Addr::new(128, 0, 0, 0),
-                    tun_gw_nbo,
-                    tun_if_idx,
-                );
-                win_route::delete_route(
-                    Ipv4Addr::new(128, 0, 0, 0),
-                    Ipv4Addr::new(128, 0, 0, 0),
-                    tun_gw_nbo,
-                    tun_if_idx,
-                );
-            }
-            // Remove upstream host route
-            for entry in snapshot.entries() {
-                let dest = win_route::nbo_to_ip(entry.dwForwardDest);
-                if dest == upstream_ip && entry.dwForwardMask == u32::MAX {
-                    win_route::delete_route(
-                        upstream_ip,
-                        Ipv4Addr::new(255, 255, 255, 255),
-                        entry.dwForwardNextHop,
-                        entry.dwForwardIfIndex,
-                    );
-                    break;
+        // Remove TUN split routes
+        if let Some(tun_if_idx) = win_route::find_if_index_by_ip(tun_ip) {
+            win_route::delete_route(
+                Ipv4Addr::new(0, 0, 0, 0),
+                Ipv4Addr::new(128, 0, 0, 0),
+                tun_gw_nbo,
+                tun_if_idx,
+            );
+            win_route::delete_route(
+                Ipv4Addr::new(128, 0, 0, 0),
+                Ipv4Addr::new(128, 0, 0, 0),
+                tun_gw_nbo,
+                tun_if_idx,
+            );
+        }
+        // Remove upstream host route (skip loopback)
+        if upstream_ip.octets()[0] != 127 {
+            if let Ok(snapshot) = win_route::RouteTable::read() {
+                for entry in snapshot.entries() {
+                    let dest = win_route::nbo_to_ip(entry.dwForwardDest);
+                    if dest == upstream_ip && entry.dwForwardMask == u32::MAX {
+                        win_route::delete_route(
+                            upstream_ip,
+                            Ipv4Addr::new(255, 255, 255, 255),
+                            entry.dwForwardNextHop,
+                            entry.dwForwardIfIndex,
+                        );
+                        break;
+                    }
                 }
             }
         }
