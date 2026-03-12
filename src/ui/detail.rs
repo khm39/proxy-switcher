@@ -112,6 +112,33 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
             ui.add_space(8.0);
 
+            // Bottom-pinned action buttons (rendered first via bottom panel so they
+            // always stay visible regardless of window height)
+            egui::TopBottomPanel::bottom("detail_actions")
+                .frame(
+                    egui::Frame::none()
+                        .fill(super::BG_MID)
+                        .inner_margin(egui::Margin {
+                            left: 0.0,
+                            right: 0.0,
+                            top: 8.0,
+                            bottom: 4.0,
+                        }),
+                )
+                .show_inside(ui, |ui| {
+                    match state.detail_tab {
+                        DetailTab::Basic => {
+                            render_basic_tab_buttons(ui, state, &proxy_id);
+                        }
+                        DetailTab::PortFilter | DetailTab::Note => {
+                            if ui.button(RichText::new("Save").size(13.0)).clicked() {
+                                state.needs_save = true;
+                            }
+                        }
+                    }
+                });
+
+            // Scrollable form content (takes remaining space)
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -124,20 +151,6 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                         }
                         DetailTab::Note => {
                             render_note_tab_form(ui, state, &proxy_id);
-                        }
-                    }
-
-                    ui.add_space(12.0);
-
-                    // Action buttons — always at the bottom of scrollable content
-                    match state.detail_tab {
-                        DetailTab::Basic => {
-                            render_basic_tab_buttons(ui, state, &proxy_id);
-                        }
-                        DetailTab::PortFilter | DetailTab::Note => {
-                            if ui.button(RichText::new("Save").size(13.0)).clicked() {
-                                state.needs_save = true;
-                            }
                         }
                     }
                 });

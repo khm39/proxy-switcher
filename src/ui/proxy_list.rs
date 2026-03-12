@@ -53,7 +53,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
             let mut to_delete: Option<String> = None;
 
             egui::ScrollArea::vertical()
-                .max_height(ui.available_height() - 100.0)
+                .max_height((ui.available_height() - 100.0).max(60.0))
                 .show(ui, |ui| {
                     if proxy_infos.is_empty() {
                         ui.add_space(20.0);
