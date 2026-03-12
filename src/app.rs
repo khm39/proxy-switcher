@@ -15,8 +15,9 @@ pub struct AppState {
     pub detail_tab: DetailTab,
     pub show_password: bool,
 
-    // System proxy toggle (visual only in this version)
+    // System proxy state
     pub system_proxy_on: bool,
+    pub system_proxy_message: Option<(bool, String)>, // (success, message)
 
     // Async test tracking
     pub pending_test: Option<(String, Arc<Mutex<TestStatus>>)>,
@@ -39,7 +40,8 @@ impl AppState {
             selected_proxy_id: None,
             detail_tab: DetailTab::Basic,
             show_password: false,
-            system_proxy_on: false,
+            system_proxy_on: crate::system_proxy::read_current().is_some(),
+            system_proxy_message: None,
             pending_test: None,
             needs_save: false,
             save_error: None,
@@ -112,10 +114,48 @@ impl eframe::App for App {
                         "SYSTEM PROXY [OFF]"
                     };
                     if ui.button(label).clicked() {
-                        self.state.system_proxy_on = !self.state.system_proxy_on;
+                        if self.state.system_proxy_on {
+                            // Turn OFF: clear system proxy
+                            let result = crate::system_proxy::clear_proxy();
+                            self.state.system_proxy_on = !result.success;
+                            self.state.system_proxy_message =
+                                Some((result.success, result.message));
+                        } else {
+                            // Turn ON: apply active proxy from active profile
+                            if let Some(profile) = self.state.data.active_profile() {
+                                if let Some(proxy) = profile.active_proxy() {
+                                    let result =
+                                        crate::system_proxy::apply_proxy(proxy);
+                                    self.state.system_proxy_on = result.success;
+                                    self.state.system_proxy_message =
+                                        Some((result.success, result.message));
+                                } else {
+                                    self.state.system_proxy_message = Some((
+                                        false,
+                                        "No active proxy selected in the active profile"
+                                            .to_string(),
+                                    ));
+                                }
+                            } else {
+                                self.state.system_proxy_message = Some((
+                                    false,
+                                    "No active profile selected".to_string(),
+                                ));
+                            }
+                        }
                     }
                 });
             });
+
+            // Show system proxy status message
+            if let Some((success, msg)) = &self.state.system_proxy_message {
+                let color = if *success {
+                    crate::ui::COLOR_SUCCESS
+                } else {
+                    crate::ui::COLOR_FAILED
+                };
+                ui.colored_label(color, msg.as_str());
+            }
 
             // Show save error if any
             if let Some(err) = &self.state.save_error {
@@ -141,5 +181,8 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         let _ = crate::storage::save(&self.state.data);
+        // Optionally clear system proxy on exit to avoid leaving stale settings
+        // Uncomment the line below if you want auto-clear on exit:
+        // let _ = crate::system_proxy::clear_proxy();
     }
 }
