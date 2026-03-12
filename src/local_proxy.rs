@@ -2,11 +2,11 @@
 // Transparent proxy via TUN virtual NIC + smoltcp userspace TCP stack.
 //
 // Architecture:
-//   [App traffic] → [OS route → TUN device] → [smoltcp TCP stack]
+//   [App traffic] → [OS route → TUN device (tun-rs)] → [smoltcp TCP stack]
 //     → [per-connection relay] → [SOCKS5/HTTP upstream proxy] → [Internet]
 //     ← [response] ← [smoltcp builds TCP/IP packets] ← [TUN device]
 //
-// Cross-platform: Linux (/dev/net/tun), Windows (Wintun), macOS (utun).
+// Cross-platform via tun-rs: Linux, Windows (Wintun), macOS (utun).
 // ---------------------------------------------------------------------------
 
 use crate::models::{Proxy, ProxyType};
@@ -16,7 +16,6 @@ use smoltcp::socket::tcp::{self as smol_tcp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 use std::collections::{HashMap, VecDeque};
-use std::io;
 use std::net::SocketAddrV4;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
@@ -25,9 +24,11 @@ use tokio::sync::{broadcast, mpsc};
 // Constants
 // ---------------------------------------------------------------------------
 
-const TUN_ADDR: [u8; 4] = [10, 0, 85, 1];
-const TUN_GW: [u8; 4] = [10, 0, 85, 1];
+const TUN_ADDR: &str = "10.0.85.1";
+const TUN_ADDR_BYTES: [u8; 4] = [10, 0, 85, 1];
 const TUN_CIDR_PREFIX: u8 = 24;
+const TUN_NAME: &str = "proxyswitch0";
+const TUN_MTU: u16 = 1500;
 const SMOL_TCP_RX_BUF: usize = 65535;
 const SMOL_TCP_TX_BUF: usize = 65535;
 const MAX_SOCKETS: usize = 256;
@@ -76,10 +77,10 @@ impl UpstreamConfig {
 }
 
 // ---------------------------------------------------------------------------
-// TunBridge – smoltcp PHY device backed by a channel pair.
+// TunBridge – smoltcp PHY device backed by packet queues.
 //
-// Packets written by smoltcp go to `tx_out` (we read and write to real TUN).
-// Packets we read from real TUN go into `rx_in` (smoltcp reads them).
+// Packets read from real TUN go into rx_queue (smoltcp reads them).
+// Packets written by smoltcp go to tx_queue (we send to real TUN).
 // ---------------------------------------------------------------------------
 
 struct TunBridge {
@@ -179,7 +180,6 @@ struct ConnectionInfo {
 /// Handle to control the running transparent proxy.
 pub struct ProxyHandle {
     shutdown_tx: broadcast::Sender<()>,
-    pub listen_info: String,
 }
 
 impl ProxyHandle {
@@ -209,116 +209,16 @@ impl Default for ProxyStatus {
 }
 
 // ---------------------------------------------------------------------------
-// TUN device creation (platform-specific)
+// TUN device creation via tun-rs
 // ---------------------------------------------------------------------------
 
-/// Open/create a TUN device. Returns (reader_fd, writer_fd) or equivalent.
-/// On error, returns a human-readable message.
-#[cfg(target_os = "linux")]
-fn create_tun_device() -> Result<(TunReader, TunWriter), String> {
-    use std::fs::OpenOptions;
-    use std::os::unix::io::AsRawFd;
-    use std::process::Command;
-
-    // Open /dev/net/tun
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/net/tun")
-        .map_err(|e| format!("Cannot open /dev/net/tun: {e} (run as root?)"))?;
-
-    let fd = file.as_raw_fd();
-    let name = "proxyswitch0";
-
-    // ioctl to create TUN device
-    unsafe {
-        let mut ifr: libc::ifreq = std::mem::zeroed();
-        let name_bytes = name.as_bytes();
-        let ifr_name = &mut ifr.ifr_name[..name_bytes.len()];
-        ifr_name.copy_from_slice(std::mem::transmute(name_bytes));
-        ifr.ifr_ifru.ifru_flags = (libc::IFF_TUN | libc::IFF_NO_PI) as i16;
-
-        let ret = libc::ioctl(fd, 0x400454CA_u64, &mut ifr); // TUNSETIFF
-        if ret < 0 {
-            return Err(format!(
-                "ioctl TUNSETIFF failed: {}",
-                io::Error::last_os_error()
-            ));
-        }
-    }
-
-    // Configure IP
-    let addr = format!("{}.{}.{}.{}/{}", TUN_ADDR[0], TUN_ADDR[1], TUN_ADDR[2], TUN_ADDR[3], TUN_CIDR_PREFIX);
-    Command::new("ip")
-        .args(["addr", "add", &addr, "dev", name])
-        .output()
-        .map_err(|e| format!("ip addr add failed: {e}"))?;
-    Command::new("ip")
-        .args(["link", "set", name, "up"])
-        .output()
-        .map_err(|e| format!("ip link set up failed: {e}"))?;
-
-    let file2 = file.try_clone().map_err(|e| format!("clone fd: {e}"))?;
-    Ok((TunReader(file), TunWriter(file2)))
-}
-
-#[cfg(target_os = "windows")]
-fn create_tun_device() -> Result<(TunReader, TunWriter), String> {
-    // Windows: use Wintun via wintun crate or manual DLL loading.
-    // For now, return a placeholder error with instructions.
-    Err("Windows TUN support requires Wintun driver. \
-         Download wintun.dll from https://www.wintun.net/ and place in the app directory. \
-         Full Wintun integration is planned for a future release."
-        .to_string())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn create_tun_device() -> Result<(TunReader, TunWriter), String> {
-    Err("TUN device creation is not yet supported on this platform".to_string())
-}
-
-// Platform-specific TUN reader/writer wrappers
-
-#[cfg(target_os = "linux")]
-struct TunReader(std::fs::File);
-
-#[cfg(target_os = "linux")]
-struct TunWriter(std::fs::File);
-
-#[cfg(not(target_os = "linux"))]
-struct TunReader;
-
-#[cfg(not(target_os = "linux"))]
-struct TunWriter;
-
-impl TunReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        #[cfg(target_os = "linux")]
-        {
-            use std::io::Read;
-            self.0.read(buf)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = buf;
-            Err(io::Error::new(io::ErrorKind::Unsupported, "not supported"))
-        }
-    }
-}
-
-impl TunWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        #[cfg(target_os = "linux")]
-        {
-            use std::io::Write;
-            self.0.write(buf)
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = buf;
-            Err(io::Error::new(io::ErrorKind::Unsupported, "not supported"))
-        }
-    }
+fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
+    tun_rs::DeviceBuilder::new()
+        .name(TUN_NAME)
+        .ipv4(TUN_ADDR, TUN_CIDR_PREFIX, None)
+        .mtu(TUN_MTU)
+        .build_async()
+        .map_err(|e| format!("Failed to create TUN device: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -352,16 +252,51 @@ fn add_routes(upstream_host: &str) -> Result<(), String> {
 
         // Add default route through TUN
         let _ = Command::new("ip")
-            .args(["route", "add", "default", "dev", "proxyswitch0", "metric", "10"])
+            .args(["route", "add", "default", "dev", TUN_NAME, "metric", "10"])
             .output();
 
         Ok(())
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+
+        // Windows: add route via TUN interface
+        // The TUN interface is assigned 10.0.85.1; we route all traffic through it
+        let _ = Command::new("route")
+            .args(["add", "0.0.0.0", "mask", "0.0.0.0", TUN_ADDR, "metric", "10"])
+            .output();
+
+        // Keep upstream proxy reachable via original gateway
+        let output = Command::new("route")
+            .args(["print", "0.0.0.0"])
+            .output()
+            .map_err(|e| format!("route print: {e}"))?;
+        let route_table = String::from_utf8_lossy(&output.stdout);
+
+        // Parse default gateway from route table (simplified)
+        for line in route_table.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.first() == Some(&"0.0.0.0") && parts.get(1) == Some(&"0.0.0.0") {
+                if let Some(gw) = parts.get(2) {
+                    if *gw != TUN_ADDR {
+                        let _ = Command::new("route")
+                            .args(["add", upstream_host, "mask", "255.255.255.255", gw])
+                            .output();
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = upstream_host;
-        Ok(()) // Route management handled separately on other platforms
+        Ok(())
     }
 }
 
@@ -370,14 +305,25 @@ fn remove_routes(upstream_host: &str) {
     {
         use std::process::Command;
         let _ = Command::new("ip")
-            .args(["route", "del", "default", "dev", "proxyswitch0"])
+            .args(["route", "del", "default", "dev", TUN_NAME])
             .output();
         let _ = Command::new("ip")
             .args(["route", "del", upstream_host])
             .output();
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let _ = Command::new("route")
+            .args(["delete", "0.0.0.0", "mask", "0.0.0.0", TUN_ADDR])
+            .output();
+        let _ = Command::new("route")
+            .args(["delete", upstream_host])
+            .output();
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = upstream_host;
     }
@@ -501,7 +447,7 @@ async fn connect_http_proxy(
     Ok(stream)
 }
 
-/// Simple base64 encoder (no padding needed for Basic auth).
+/// Simple base64 encoder for HTTP Basic auth.
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
@@ -537,14 +483,14 @@ pub fn start(
     status: Arc<Mutex<ProxyStatus>>,
     ctx: egui::Context,
 ) -> Result<ProxyHandle, String> {
-    // Create TUN device
-    let (tun_reader, tun_writer) = create_tun_device()?;
+    // Create TUN device via tun-rs
+    let tun_device = create_tun_device()?;
 
     // Add routes
     add_routes(&config.host)?;
 
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-    let listen_info = format!("TUN proxyswitch0 ({})", format_ip(&TUN_ADDR));
+    let listen_info = format!("TUN {} ({})", TUN_NAME, TUN_ADDR);
 
     let upstream_host = config.host.clone();
 
@@ -552,14 +498,13 @@ pub fn start(
     {
         let mut s = status.lock().unwrap();
         s.running = true;
-        s.tun_addr = listen_info.clone();
+        s.tun_addr = listen_info;
         s.error = None;
     }
     ctx.request_repaint();
 
     rt.spawn(proxy_loop(
-        tun_reader,
-        tun_writer,
+        tun_device,
         config,
         shutdown_rx,
         status.clone(),
@@ -567,48 +512,38 @@ pub fn start(
         upstream_host,
     ));
 
-    Ok(ProxyHandle {
-        shutdown_tx,
-        listen_info,
-    })
+    Ok(ProxyHandle { shutdown_tx })
 }
 
 async fn proxy_loop(
-    mut tun_reader: TunReader,
-    mut tun_writer: TunWriter,
+    tun_device: tun_rs::AsyncDevice,
     config: UpstreamConfig,
     mut shutdown: broadcast::Receiver<()>,
     status: Arc<Mutex<ProxyStatus>>,
     ctx: egui::Context,
     upstream_host: String,
 ) {
+    let tun = Arc::new(tun_device);
+
     // smoltcp interface setup
-    let mut bridge = TunBridge::new(1500);
+    let mut bridge = TunBridge::new(TUN_MTU as usize);
     let smol_config = Config::new(HardwareAddress::Ip);
     let mut iface = Interface::new(smol_config, &mut bridge, SmolInstant::now());
     iface.update_ip_addrs(|addrs| {
         let _ = addrs.push(IpCidr::new(
-            IpAddress::v4(TUN_ADDR[0], TUN_ADDR[1], TUN_ADDR[2], TUN_ADDR[3]),
+            IpAddress::v4(TUN_ADDR_BYTES[0], TUN_ADDR_BYTES[1], TUN_ADDR_BYTES[2], TUN_ADDR_BYTES[3]),
             TUN_CIDR_PREFIX,
         ));
     });
 
-    // Socket set
-    let mut rx_bufs: Vec<smol_tcp::SocketBuffer<'_>> = Vec::new();
-    let mut tx_bufs: Vec<smol_tcp::SocketBuffer<'_>> = Vec::new();
-    for _ in 0..MAX_SOCKETS {
-        rx_bufs.push(smol_tcp::SocketBuffer::new(vec![0u8; SMOL_TCP_RX_BUF]));
-        tx_bufs.push(smol_tcp::SocketBuffer::new(vec![0u8; SMOL_TCP_TX_BUF]));
-    }
-
     let mut sockets = SocketSet::new(Vec::new());
 
-    // Connection tracking: smoltcp socket handle → upstream info
+    // Connection tracking
     let connections: Arc<Mutex<HashMap<smoltcp::iface::SocketHandle, ConnectionInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     let _config = Arc::new(config);
-    let mut buf = [0u8; 65535];
+    let mut buf = vec![0u8; 65535];
 
     loop {
         // Check shutdown
@@ -616,27 +551,16 @@ async fn proxy_loop(
             break;
         }
 
-        // Read from TUN (non-blocking attempt via short timeout)
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = tun_reader.0.as_raw_fd();
+        // Read from TUN (async with short timeout)
+        let read_result = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            tun.recv(&mut buf),
+        )
+        .await;
 
-            // Use poll to check readability with 10ms timeout
-            let mut pollfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ready = unsafe { libc::poll(&mut pollfd, 1, 10) };
-
-            if ready > 0 {
-                match tun_reader.read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        bridge.push_rx(buf[..n].to_vec());
-                    }
-                    _ => {}
-                }
+        if let Ok(Ok(n)) = read_result {
+            if n > 0 {
+                bridge.push_rx(buf[..n].to_vec());
             }
         }
 
@@ -644,17 +568,10 @@ async fn proxy_loop(
         let now = SmolInstant::now();
         let _changed = iface.poll(now, &mut bridge, &mut sockets);
 
-        // Check for new connections and relay data on existing sockets
-        // (In a full implementation, we would listen on a smoltcp TCP socket
-        //  and accept connections, then spawn relay tasks for each.)
-        //
-        // For each socket in sockets:
-        //   - If it has received data: forward to upstream
-        //   - If upstream has data: write to socket
-
         // Write outgoing packets from smoltcp to TUN
         while let Some(pkt) = bridge.pop_tx() {
-            let _ = tun_writer.write(&pkt);
+            let tun_ref = tun.clone();
+            let _ = tun_ref.send(&pkt).await;
         }
 
         // Update status
@@ -662,9 +579,6 @@ async fn proxy_loop(
             let mut s = status.lock().unwrap();
             s.connections = connections.lock().unwrap().len();
         }
-
-        // Small yield to not spin-loop
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
     // Cleanup
