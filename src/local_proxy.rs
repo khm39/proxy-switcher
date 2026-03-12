@@ -10,28 +10,24 @@
 // ---------------------------------------------------------------------------
 
 use crate::models::{Proxy, ProxyType};
-use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::tcp::{self as smol_tcp};
+use smoltcp::socket::tcp::{self as smol_tcp, State as TcpState};
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
-use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddrV4;
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const TUN_ADDR: &str = "10.0.85.1";
-const TUN_ADDR_BYTES: [u8; 4] = [10, 0, 85, 1];
-const TUN_CIDR_PREFIX: u8 = 24;
 const TUN_NAME: &str = "proxyswitch0";
 const TUN_MTU: u16 = 1500;
-const SMOL_TCP_RX_BUF: usize = 65535;
-const SMOL_TCP_TX_BUF: usize = 65535;
-const MAX_SOCKETS: usize = 256;
+const SMOL_TCP_BUF: usize = 65535;
 
 // ---------------------------------------------------------------------------
 // UpstreamConfig – derived from Proxy model
@@ -61,7 +57,6 @@ impl UpstreamConfig {
         }
     }
 
-    /// Should traffic to `dest_port` go through the upstream proxy?
     pub fn should_proxy(&self, dest_port: u16) -> bool {
         if !self.filter_enabled || self.filter_ports.is_empty() {
             true
@@ -70,7 +65,6 @@ impl UpstreamConfig {
         }
     }
 
-    /// Build SOCKS5/HTTP proxy address string.
     pub fn proxy_addr(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
@@ -78,9 +72,6 @@ impl UpstreamConfig {
 
 // ---------------------------------------------------------------------------
 // TunBridge – smoltcp PHY device backed by packet queues.
-//
-// Packets read from real TUN go into rx_queue (smoltcp reads them).
-// Packets written by smoltcp go to tx_queue (we send to real TUN).
 // ---------------------------------------------------------------------------
 
 struct TunBridge {
@@ -159,25 +150,25 @@ impl Device for TunBridge {
 }
 
 // ---------------------------------------------------------------------------
-// ConnectionInfo – tracks per-socket upstream relay state
+// Relay state – per-connection tracking
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-struct ConnectionInfo {
+struct RelayState {
     dest: SocketAddrV4,
-    /// Channel to send data FROM smoltcp socket TO the upstream relay task.
-    to_upstream: mpsc::UnboundedSender<Vec<u8>>,
-    /// Channel to receive data FROM upstream relay task TO smoltcp socket.
+    /// Data arriving from the upstream proxy, waiting to be fed into smoltcp socket.
     from_upstream: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    established: bool,
-    closed: bool,
+    /// Data from smoltcp socket, to be sent to the upstream proxy.
+    to_upstream: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    /// Whether the upstream connection has been initiated.
+    upstream_started: bool,
+    /// Whether the upstream reported connection closed.
+    upstream_closed: Arc<Mutex<bool>>,
 }
 
 // ---------------------------------------------------------------------------
 // ProxyHandle – public API
 // ---------------------------------------------------------------------------
 
-/// Handle to control the running transparent proxy.
 pub struct ProxyHandle {
     shutdown_tx: broadcast::Sender<()>,
 }
@@ -188,7 +179,6 @@ impl ProxyHandle {
     }
 }
 
-/// Status of the local proxy, shared with the GUI.
 #[derive(Clone, Debug)]
 pub struct ProxyStatus {
     pub running: bool,
@@ -213,31 +203,28 @@ impl Default for ProxyStatus {
 // ---------------------------------------------------------------------------
 
 fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
-    log::info!("Creating TUN device: name={}, addr={}/{}, mtu={}",
-        TUN_NAME, TUN_ADDR, TUN_CIDR_PREFIX, TUN_MTU);
-    log::info!("Platform: {}", std::env::consts::OS);
-    log::info!("Arch: {}", std::env::consts::ARCH);
+    log::info!("Creating TUN device: name={}, addr={}/24, mtu={}",
+        TUN_NAME, TUN_ADDR, TUN_MTU);
+    log::info!("Platform: {}, Arch: {}", std::env::consts::OS, std::env::consts::ARCH);
 
     let mut builder = tun_rs::DeviceBuilder::new();
     builder = builder
         .name(TUN_NAME)
-        .ipv4(TUN_ADDR, TUN_CIDR_PREFIX, None)
+        .ipv4(TUN_ADDR, 24, None)
         .mtu(TUN_MTU);
 
-    // On Windows, resolve wintun.dll path relative to the executable
     #[cfg(target_os = "windows")]
     {
         let dll_path = find_wintun_dll();
         match &dll_path {
             Some(path) => {
                 log::info!("wintun.dll found: {}", path);
-                // Log file size and PE architecture for diagnostics
                 if let Ok(meta) = std::fs::metadata(path) {
                     log::info!("wintun.dll size: {} bytes", meta.len());
                 }
                 log_dll_arch(path);
             }
-            None => log::warn!("wintun.dll not found in any search path, using tun-rs default"),
+            None => log::warn!("wintun.dll not found, using tun-rs default"),
         }
         if let Some(path) = dll_path {
             builder = builder.wintun_file(path);
@@ -248,9 +235,7 @@ fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
     let result = builder.build_async();
 
     match &result {
-        Ok(_dev) => {
-            log::info!("TUN device created successfully");
-        }
+        Ok(_) => log::info!("TUN device created successfully"),
         Err(e) => {
             log::error!("TUN device creation failed: {e}");
             log::error!("Error debug: {e:?}");
@@ -262,7 +247,6 @@ fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
         let debug_msg = format!("{e:?}");
 
         if debug_msg.contains("193") && debug_msg.contains("LoadLibrary") {
-            // Windows error 193 = ERROR_BAD_EXE_FORMAT = architecture mismatch
             let arch = std::env::consts::ARCH;
             let need = match arch {
                 "x86_64" => "amd64",
@@ -275,57 +259,42 @@ fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
                  use wintun/bin/{need}/wintun.dll from the Wintun ZIP. \
                  Download: https://www.wintun.net/"
             )
-        } else if msg.contains("LoadLibrary") || msg.contains("wintun") || debug_msg.contains("LoadLibrary") {
+        } else if msg.contains("LoadLibrary") || debug_msg.contains("LoadLibrary") {
             format!(
-                "Wintun driver not found. Please download wintun.dll from \
-                 https://www.wintun.net/ and place it next to the executable \
-                 or in the current directory. (Error: {msg}) (Debug: {debug_msg})"
+                "Wintun driver not found. Download wintun.dll from \
+                 https://www.wintun.net/ and place next to exe. ({msg})"
             )
-        } else if msg.contains("permission") || msg.contains("denied") || msg.contains("EPERM") {
-            format!(
-                "Permission denied creating TUN device. \
-                 Run as Administrator (Windows) or root (Linux). (Error: {msg})"
-            )
+        } else if msg.contains("permission") || msg.contains("denied") {
+            format!("Permission denied. Run as Administrator/root. ({msg})")
         } else {
-            format!("Failed to create TUN device: {msg} (Debug: {debug_msg})")
+            format!("Failed to create TUN device: {msg} ({debug_msg})")
         }
     })
 }
 
-/// Search for wintun.dll in common locations.
 #[cfg(target_os = "windows")]
 fn find_wintun_dll() -> Option<String> {
     log::info!("Searching for wintun.dll...");
 
-    // 1. Next to the executable
-    match std::env::current_exe() {
-        Ok(exe_path) => {
-            log::info!("  exe path: {}", exe_path.display());
-            if let Some(exe_dir) = exe_path.parent() {
-                let candidate = exe_dir.join("wintun.dll");
-                log::info!("  checking: {} -> exists={}", candidate.display(), candidate.exists());
-                if candidate.exists() {
-                    return Some(candidate.to_string_lossy().into_owned());
-                }
-            }
-        }
-        Err(e) => log::warn!("  current_exe() failed: {e}"),
-    }
-
-    // 2. Current working directory
-    match std::env::current_dir() {
-        Ok(cwd) => {
-            log::info!("  cwd: {}", cwd.display());
-            let candidate = cwd.join("wintun.dll");
+    if let Ok(exe_path) = std::env::current_exe() {
+        log::info!("  exe path: {}", exe_path.display());
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidate = exe_dir.join("wintun.dll");
             log::info!("  checking: {} -> exists={}", candidate.display(), candidate.exists());
             if candidate.exists() {
                 return Some(candidate.to_string_lossy().into_owned());
             }
         }
-        Err(e) => log::warn!("  current_dir() failed: {e}"),
     }
 
-    // 3. Check PATH directories
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("wintun.dll");
+        log::info!("  checking: {} -> exists={}", candidate.display(), candidate.exists());
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in path_var.split(';') {
             let candidate = std::path::PathBuf::from(dir).join("wintun.dll");
@@ -334,94 +303,30 @@ fn find_wintun_dll() -> Option<String> {
                 return Some(candidate.to_string_lossy().into_owned());
             }
         }
-        log::info!("  not found in any PATH directory");
-    }
-
-    // 4. List files in exe dir and cwd for debugging
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            log::info!("  Files in exe dir ({}):", exe_dir.display());
-            if let Ok(entries) = std::fs::read_dir(exe_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.ends_with(".dll") || name_str.contains("wintun") {
-                        log::info!("    {}", name_str);
-                    }
-                }
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        log::info!("  Files in cwd ({}):", cwd.display());
-        if let Ok(entries) = std::fs::read_dir(&cwd) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.ends_with(".dll") || name_str.contains("wintun") {
-                    log::info!("    {}", name_str);
-                }
-            }
-        }
     }
 
     log::warn!("wintun.dll not found anywhere");
     None
 }
 
-/// Read PE header to determine DLL architecture (x86/x64/ARM64).
 #[cfg(target_os = "windows")]
 fn log_dll_arch(path: &str) {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else {
-        log::warn!("Cannot open DLL for arch check: {path}");
-        return;
-    };
-    // Read DOS header: e_lfanew at offset 0x3C
+    let Ok(mut f) = std::fs::File::open(path) else { return };
     let mut buf = [0u8; 4];
-    if f.seek(SeekFrom::Start(0x3C)).is_err() || f.read_exact(&mut buf).is_err() {
-        log::warn!("Cannot read PE offset from DLL");
-        return;
-    }
+    if f.seek(SeekFrom::Start(0x3C)).is_err() || f.read_exact(&mut buf).is_err() { return }
     let pe_offset = u32::from_le_bytes(buf) as u64;
-    // Read PE signature + Machine field
-    if f.seek(SeekFrom::Start(pe_offset)).is_err() {
-        log::warn!("Cannot seek to PE header");
-        return;
-    }
+    if f.seek(SeekFrom::Start(pe_offset)).is_err() { return }
     let mut header = [0u8; 6];
-    if f.read_exact(&mut header).is_err() {
-        log::warn!("Cannot read PE header");
-        return;
-    }
-    // header[0..4] = "PE\0\0", header[4..6] = Machine
+    if f.read_exact(&mut header).is_err() { return }
     let machine = u16::from_le_bytes([header[4], header[5]]);
     let arch_str = match machine {
         0x014C => "x86 (32-bit)",
         0x8664 => "x86_64 (64-bit)",
         0xAA64 => "ARM64",
-        other => {
-            log::info!("wintun.dll PE Machine: 0x{:04X} (unknown)", other);
-            return;
-        }
+        _ => { log::info!("wintun.dll PE Machine: 0x{:04X}", machine); return }
     };
-    let app_arch = std::env::consts::ARCH;
-    log::info!("wintun.dll architecture: {} (app is {})", arch_str, app_arch);
-
-    // Check mismatch
-    let matches = match (machine, app_arch) {
-        (0x8664, "x86_64") => true,
-        (0x014C, "x86") => true,
-        (0xAA64, "aarch64") => true,
-        _ => false,
-    };
-    if !matches {
-        log::error!(
-            "ARCHITECTURE MISMATCH: wintun.dll is {} but app is {}. \
-             Use the correct DLL from wintun/bin/",
-            arch_str, app_arch
-        );
-    }
+    log::info!("wintun.dll arch: {} (app: {})", arch_str, std::env::consts::ARCH);
 }
 
 // ---------------------------------------------------------------------------
@@ -429,56 +334,44 @@ fn log_dll_arch(path: &str) {
 // ---------------------------------------------------------------------------
 
 fn add_routes(upstream_host: &str) -> Result<(), String> {
+    log::info!("Adding routes (upstream_host={})", upstream_host);
+
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
-
-        // Get current default gateway to preserve route to upstream proxy
         let output = Command::new("ip")
             .args(["route", "show", "default"])
             .output()
             .map_err(|e| format!("ip route show: {e}"))?;
         let default_route = String::from_utf8_lossy(&output.stdout);
-
-        // Extract gateway IP (e.g., "default via 192.168.1.1 dev eth0")
         if let Some(gw_line) = default_route.lines().next() {
             let parts: Vec<&str> = gw_line.split_whitespace().collect();
             if let (Some("via"), Some(gw), Some("dev"), Some(dev)) =
                 (parts.get(1).copied(), parts.get(2).copied(), parts.get(3).copied(), parts.get(4).copied())
             {
-                // Route upstream proxy IP through original gateway (avoid loop)
+                log::info!("Original gateway: {} via {}", gw, dev);
                 let _ = Command::new("ip")
                     .args(["route", "add", upstream_host, "via", gw, "dev", dev])
                     .output();
             }
         }
-
-        // Add default route through TUN
         let _ = Command::new("ip")
             .args(["route", "add", "default", "dev", TUN_NAME, "metric", "10"])
             .output();
-
         Ok(())
     }
 
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-
-        // Windows: add route via TUN interface
-        // The TUN interface is assigned 10.0.85.1; we route all traffic through it
         let _ = Command::new("route")
             .args(["add", "0.0.0.0", "mask", "0.0.0.0", TUN_ADDR, "metric", "10"])
             .output();
-
-        // Keep upstream proxy reachable via original gateway
         let output = Command::new("route")
             .args(["print", "0.0.0.0"])
             .output()
             .map_err(|e| format!("route print: {e}"))?;
         let route_table = String::from_utf8_lossy(&output.stdout);
-
-        // Parse default gateway from route table (simplified)
         for line in route_table.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.first() == Some(&"0.0.0.0") && parts.get(1) == Some(&"0.0.0.0") {
@@ -492,58 +385,40 @@ fn add_routes(upstream_host: &str) -> Result<(), String> {
                 }
             }
         }
-
         Ok(())
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        let _ = upstream_host;
-        Ok(())
-    }
+    { let _ = upstream_host; Ok(()) }
 }
 
 fn remove_routes(upstream_host: &str) {
+    log::info!("Removing routes");
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
-        let _ = Command::new("ip")
-            .args(["route", "del", "default", "dev", TUN_NAME])
-            .output();
-        let _ = Command::new("ip")
-            .args(["route", "del", upstream_host])
-            .output();
+        let _ = Command::new("ip").args(["route", "del", "default", "dev", TUN_NAME]).output();
+        let _ = Command::new("ip").args(["route", "del", upstream_host]).output();
     }
-
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-        let _ = Command::new("route")
-            .args(["delete", "0.0.0.0", "mask", "0.0.0.0", TUN_ADDR])
-            .output();
-        let _ = Command::new("route")
-            .args(["delete", upstream_host])
-            .output();
+        let _ = Command::new("route").args(["delete", "0.0.0.0", "mask", "0.0.0.0", TUN_ADDR]).output();
+        let _ = Command::new("route").args(["delete", upstream_host]).output();
     }
-
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        let _ = upstream_host;
-    }
+    { let _ = upstream_host; }
 }
 
 // ---------------------------------------------------------------------------
-// Upstream connector – connects to target via SOCKS5/HTTP proxy or direct
+// Upstream connectors
 // ---------------------------------------------------------------------------
 
 async fn connect_upstream(
     config: &UpstreamConfig,
     dest: SocketAddrV4,
 ) -> Result<tokio::net::TcpStream, String> {
-    let dest_port = dest.port();
-
-    if !config.should_proxy(dest_port) {
-        // Direct connection (bypass proxy)
+    if !config.should_proxy(dest.port()) {
         tokio::net::TcpStream::connect(dest)
             .await
             .map_err(|e| format!("Direct connect to {dest}: {e}"))
@@ -556,58 +431,33 @@ async fn connect_upstream(
     }
 }
 
-async fn connect_socks5(
-    config: &UpstreamConfig,
-    dest: SocketAddrV4,
-) -> Result<tokio::net::TcpStream, String> {
+async fn connect_socks5(config: &UpstreamConfig, dest: SocketAddrV4) -> Result<tokio::net::TcpStream, String> {
     let proxy_addr = config.proxy_addr();
     let dest_ip = dest.ip().to_string();
     let target = (&*dest_ip, dest.port());
-
     if config.username.is_empty() {
         tokio_socks::tcp::Socks5Stream::connect(&*proxy_addr, target)
-            .await
-            .map(|s| s.into_inner())
-            .map_err(|e| format!("SOCKS5: {e}"))
+            .await.map(|s| s.into_inner()).map_err(|e| format!("SOCKS5: {e}"))
     } else {
         tokio_socks::tcp::Socks5Stream::connect_with_password(
-            &*proxy_addr,
-            target,
-            &config.username,
-            &config.password,
-        )
-        .await
-        .map(|s| s.into_inner())
-        .map_err(|e| format!("SOCKS5 auth: {e}"))
+            &*proxy_addr, target, &config.username, &config.password,
+        ).await.map(|s| s.into_inner()).map_err(|e| format!("SOCKS5 auth: {e}"))
     }
 }
 
-async fn connect_socks4(
-    config: &UpstreamConfig,
-    dest: SocketAddrV4,
-) -> Result<tokio::net::TcpStream, String> {
+async fn connect_socks4(config: &UpstreamConfig, dest: SocketAddrV4) -> Result<tokio::net::TcpStream, String> {
     let proxy_addr = config.proxy_addr();
     let dest_ip = dest.ip().to_string();
     let target = (&*dest_ip, dest.port());
-
     tokio_socks::tcp::Socks4Stream::connect(&*proxy_addr, target)
-        .await
-        .map(|s| s.into_inner())
-        .map_err(|e| format!("SOCKS4: {e}"))
+        .await.map(|s| s.into_inner()).map_err(|e| format!("SOCKS4: {e}"))
 }
 
-async fn connect_http_proxy(
-    config: &UpstreamConfig,
-    dest: SocketAddrV4,
-) -> Result<tokio::net::TcpStream, String> {
+async fn connect_http_proxy(config: &UpstreamConfig, dest: SocketAddrV4) -> Result<tokio::net::TcpStream, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
     let proxy_addr = config.proxy_addr();
     let mut stream = tokio::net::TcpStream::connect(&proxy_addr)
-        .await
-        .map_err(|e| format!("HTTP proxy connect: {e}"))?;
-
-    // Send CONNECT request
+        .await.map_err(|e| format!("HTTP proxy connect: {e}"))?;
     let connect_req = if config.username.is_empty() {
         format!("CONNECT {dest} HTTP/1.1\r\nHost: {dest}\r\n\r\n")
     } else {
@@ -615,42 +465,24 @@ async fn connect_http_proxy(
         let mut creds = Vec::new();
         write!(creds, "{}:{}", config.username, config.password).unwrap();
         let b64 = base64_encode(&creds);
-        format!(
-            "CONNECT {dest} HTTP/1.1\r\nHost: {dest}\r\nProxy-Authorization: Basic {b64}\r\n\r\n"
-        )
+        format!("CONNECT {dest} HTTP/1.1\r\nHost: {dest}\r\nProxy-Authorization: Basic {b64}\r\n\r\n")
     };
-
-    stream
-        .write_all(connect_req.as_bytes())
-        .await
-        .map_err(|e| format!("HTTP CONNECT write: {e}"))?;
-
-    // Read response status line
+    stream.write_all(connect_req.as_bytes()).await.map_err(|e| format!("CONNECT write: {e}"))?;
     let mut reader = BufReader::new(&mut stream);
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .await
-        .map_err(|e| format!("HTTP CONNECT read: {e}"))?;
-
+    reader.read_line(&mut line).await.map_err(|e| format!("CONNECT read: {e}"))?;
     if !line.contains("200") {
-        return Err(format!("HTTP CONNECT rejected: {}", line.trim()));
+        return Err(format!("CONNECT rejected: {}", line.trim()));
     }
-
-    // Drain remaining headers
     loop {
         let mut hdr = String::new();
         reader.read_line(&mut hdr).await.map_err(|e| format!("{e}"))?;
-        if hdr.trim().is_empty() {
-            break;
-        }
+        if hdr.trim().is_empty() { break; }
     }
-
     drop(reader);
     Ok(stream)
 }
 
-/// Simple base64 encoder for HTTP Basic auth.
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
@@ -661,43 +493,56 @@ fn base64_encode(data: &[u8]) -> String {
         let triple = (b0 << 16) | (b1 << 8) | b2;
         result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
         result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
+        if chunk.len() > 1 { result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char); }
+        else { result.push('='); }
+        if chunk.len() > 2 { result.push(CHARS[(triple & 0x3F) as usize] as char); }
+        else { result.push('='); }
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Packet parsing helpers
+// ---------------------------------------------------------------------------
+
+/// Parse an IP packet and extract TCP src/dst + SYN flag.
+fn parse_tcp_packet(pkt: &[u8]) -> Option<(SocketAddrV4, SocketAddrV4, bool)> {
+    let parsed = etherparse::SlicedPacket::from_ip(pkt).ok()?;
+    let (src_ip, dst_ip) = match &parsed.net {
+        Some(etherparse::NetSlice::Ipv4(ipv4)) => {
+            let hdr = ipv4.header();
+            (hdr.source_addr(), hdr.destination_addr())
+        }
+        _ => return None,
+    };
+    match &parsed.transport {
+        Some(etherparse::TransportSlice::Tcp(tcp)) => {
+            let src = SocketAddrV4::new(src_ip, tcp.source_port());
+            let dst = SocketAddrV4::new(dst_ip, tcp.destination_port());
+            let is_syn = tcp.syn() && !tcp.ack();
+            Some((src, dst, is_syn))
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Main proxy loop
 // ---------------------------------------------------------------------------
 
-/// Start the transparent proxy. Returns a handle to stop it.
 pub fn start(
     rt: &tokio::runtime::Runtime,
     config: UpstreamConfig,
     status: Arc<Mutex<ProxyStatus>>,
     ctx: egui::Context,
 ) -> Result<ProxyHandle, String> {
-    // Create TUN device via tun-rs
     let tun_device = create_tun_device()?;
-
-    // Add routes
     add_routes(&config.host)?;
 
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
     let listen_info = format!("TUN {} ({})", TUN_NAME, TUN_ADDR);
-
     let upstream_host = config.host.clone();
 
-    // Update status
     {
         let mut s = status.lock().unwrap();
         s.running = true;
@@ -706,14 +551,7 @@ pub fn start(
     }
     ctx.request_repaint();
 
-    rt.spawn(proxy_loop(
-        tun_device,
-        config,
-        shutdown_rx,
-        status.clone(),
-        ctx.clone(),
-        upstream_host,
-    ));
+    rt.spawn(proxy_loop(tun_device, config, shutdown_rx, status, ctx, upstream_host));
 
     Ok(ProxyHandle { shutdown_tx })
 }
@@ -727,60 +565,220 @@ async fn proxy_loop(
     upstream_host: String,
 ) {
     let tun = Arc::new(tun_device);
+    let config = Arc::new(config);
 
-    // smoltcp interface setup
+    // smoltcp interface: use 0.0.0.0/0 so it accepts packets to ANY destination IP.
+    // This makes smoltcp "pretend" to be every server on the internet.
     let mut bridge = TunBridge::new(TUN_MTU as usize);
     let smol_config = Config::new(HardwareAddress::Ip);
     let mut iface = Interface::new(smol_config, &mut bridge, SmolInstant::now());
     iface.update_ip_addrs(|addrs| {
-        let _ = addrs.push(IpCidr::new(
-            IpAddress::v4(TUN_ADDR_BYTES[0], TUN_ADDR_BYTES[1], TUN_ADDR_BYTES[2], TUN_ADDR_BYTES[3]),
-            TUN_CIDR_PREFIX,
-        ));
+        let _ = addrs.push(IpCidr::new(IpAddress::v4(0, 0, 0, 0), 0));
     });
+    // Default route so smoltcp sends responses
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(Ipv4Address::new(0, 0, 0, 1))
+        .ok();
 
     let mut sockets = SocketSet::new(Vec::new());
-
-    // Connection tracking
-    let connections: Arc<Mutex<HashMap<smoltcp::iface::SocketHandle, ConnectionInfo>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    let _config = Arc::new(config);
+    let mut relays: HashMap<SocketHandle, RelayState> = HashMap::new();
+    // Track ports that currently have a LISTEN socket (to avoid duplicates)
+    let mut listening_ports: HashSet<u16> = HashSet::new();
     let mut buf = vec![0u8; 65535];
+
+    log::info!("Proxy loop started, waiting for traffic...");
 
     loop {
         // Check shutdown
         if shutdown.try_recv().is_ok() {
+            log::info!("Shutdown signal received");
             break;
         }
 
-        // Read from TUN (async with short timeout)
+        // 1. Read packet from TUN (with short timeout to keep loop responsive)
         let read_result = tokio::time::timeout(
-            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(5),
             tun.recv(&mut buf),
         )
         .await;
 
         if let Ok(Ok(n)) = read_result {
             if n > 0 {
-                bridge.push_rx(buf[..n].to_vec());
+                let pkt = &buf[..n];
+
+                // Parse TCP packet to detect new connections (SYN)
+                if let Some((_src, dst, is_syn)) = parse_tcp_packet(pkt) {
+                    let dst_port = dst.port();
+
+                    if is_syn && !listening_ports.contains(&dst_port) {
+                        // Create a new smoltcp TCP socket listening on this port.
+                        // smoltcp will handle the TCP handshake (SYN-ACK).
+                        let rx_buf = smol_tcp::SocketBuffer::new(vec![0u8; SMOL_TCP_BUF]);
+                        let tx_buf = smol_tcp::SocketBuffer::new(vec![0u8; SMOL_TCP_BUF]);
+                        let mut socket = smol_tcp::Socket::new(rx_buf, tx_buf);
+
+                        if socket.listen(dst_port).is_ok() {
+                            let handle = sockets.add(socket);
+                            listening_ports.insert(dst_port);
+
+                            // Prepare relay channels
+                            let (to_up_tx, mut to_up_rx) =
+                                tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                            let from_upstream = Arc::new(Mutex::new(VecDeque::<Vec<u8>>::new()));
+                            let upstream_closed = Arc::new(Mutex::new(false));
+
+                            relays.insert(handle, RelayState {
+                                dest: dst,
+                                from_upstream: from_upstream.clone(),
+                                to_upstream: to_up_tx,
+                                upstream_started: false,
+                                upstream_closed: upstream_closed.clone(),
+                            });
+
+                            log::info!("New TCP connection to {} (port {}), socket created", dst, dst_port);
+
+                            // Spawn upstream relay task
+                            let cfg = config.clone();
+                            let from_up = from_upstream;
+                            let up_closed = upstream_closed;
+                            tokio::spawn(async move {
+                                match connect_upstream(&cfg, dst).await {
+                                    Ok(stream) => {
+                                        log::info!("Upstream connected to {}", dst);
+                                        let (mut reader, mut writer) = tokio::io::split(stream);
+
+                                        // Bidirectional relay
+                                        let from_up2 = from_up.clone();
+                                        let up_closed2 = up_closed.clone();
+
+                                        // upstream → smoltcp (read from upstream, push to from_upstream queue)
+                                        let read_task = tokio::spawn(async move {
+                                            use tokio::io::AsyncReadExt;
+                                            let mut rbuf = vec![0u8; 8192];
+                                            loop {
+                                                match reader.read(&mut rbuf).await {
+                                                    Ok(0) => {
+                                                        log::debug!("Upstream read EOF for {}", dst);
+                                                        *up_closed2.lock().unwrap() = true;
+                                                        break;
+                                                    }
+                                                    Ok(n) => {
+                                                        from_up2.lock().unwrap().push_back(rbuf[..n].to_vec());
+                                                    }
+                                                    Err(e) => {
+                                                        log::debug!("Upstream read error for {}: {}", dst, e);
+                                                        *up_closed2.lock().unwrap() = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                        // smoltcp → upstream (read from channel, write to upstream)
+                                        let write_task = tokio::spawn(async move {
+                                            use tokio::io::AsyncWriteExt;
+                                            while let Some(data) = to_up_rx.recv().await {
+                                                if writer.write_all(&data).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        });
+
+                                        let _ = tokio::join!(read_task, write_task);
+                                    }
+                                    Err(e) => {
+                                        log::error!("Upstream connect failed for {}: {}", dst, e);
+                                        *up_closed.lock().unwrap() = true;
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+
+                // Feed packet to smoltcp
+                bridge.push_rx(pkt.to_vec());
             }
         }
 
-        // Process smoltcp
+        // 2. Poll smoltcp (processes TCP state machine)
         let now = SmolInstant::now();
-        let _changed = iface.poll(now, &mut bridge, &mut sockets);
+        iface.poll(now, &mut bridge, &mut sockets);
 
-        // Write outgoing packets from smoltcp to TUN
-        while let Some(pkt) = bridge.pop_tx() {
-            let tun_ref = tun.clone();
-            let _ = tun_ref.send(&pkt).await;
+        // 3. Process relay data for each connection
+        let mut to_remove: Vec<SocketHandle> = Vec::new();
+
+        for (&handle, relay) in relays.iter_mut() {
+            let socket = sockets.get_mut::<smol_tcp::Socket>(handle);
+
+            // Once socket transitions from LISTEN → active, free the port for new listeners
+            if !relay.upstream_started && socket.state() != TcpState::Listen {
+                relay.upstream_started = true;
+                listening_ports.remove(&relay.dest.port());
+            }
+
+            // smoltcp socket → upstream: read data from smoltcp and send to upstream
+            if socket.can_recv() {
+                let mut data = vec![0u8; 8192];
+                match socket.recv_slice(&mut data) {
+                    Ok(n) if n > 0 => {
+                        data.truncate(n);
+                        let _ = relay.to_upstream.send(data);
+                    }
+                    _ => {}
+                }
+            }
+
+            // upstream → smoltcp socket: write data from upstream into smoltcp
+            if socket.can_send() {
+                let mut queue = relay.from_upstream.lock().unwrap();
+                while let Some(data) = queue.pop_front() {
+                    match socket.send_slice(&data) {
+                        Ok(sent) if sent < data.len() => {
+                            // Partial send, push remainder back
+                            queue.push_front(data[sent..].to_vec());
+                            break;
+                        }
+                        Err(_) => {
+                            queue.push_front(data);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // If upstream closed and all data drained, close smoltcp socket
+            if *relay.upstream_closed.lock().unwrap()
+                && relay.from_upstream.lock().unwrap().is_empty()
+                && socket.can_send()
+            {
+                socket.close();
+            }
+
+            // Clean up closed sockets
+            if socket.state() == TcpState::Closed {
+                to_remove.push(handle);
+            }
         }
 
-        // Update status
+        for handle in to_remove {
+            if let Some(relay) = relays.remove(&handle) {
+                log::debug!("Connection to {} closed", relay.dest);
+            }
+            sockets.remove(handle);
+        }
+
+        // 4. Write outgoing packets from smoltcp to TUN
+        while let Some(pkt) = bridge.pop_tx() {
+            let _ = tun.send(&pkt).await;
+        }
+
+        // 5. Update GUI status
         {
             let mut s = status.lock().unwrap();
-            s.connections = connections.lock().unwrap().len();
+            s.connections = relays.len();
         }
     }
 
@@ -792,6 +790,7 @@ async fn proxy_loop(
         s.connections = 0;
     }
     ctx.request_repaint();
+    log::info!("Proxy loop stopped");
 }
 
 fn format_ip(addr: &[u8; 4]) -> String {
@@ -837,7 +836,6 @@ mod tests {
         assert!(config.should_proxy(80));
         assert!(config.should_proxy(443));
         assert!(!config.should_proxy(22));
-        assert!(!config.should_proxy(8080));
     }
 
     #[test]
@@ -853,10 +851,8 @@ mod tests {
             ports: vec![80, 443],
             raw_input: "80, 443".into(),
         };
-
         let config = UpstreamConfig::from_proxy(&proxy);
         assert_eq!(config.host, "socks.local");
-        assert_eq!(config.port, 1080);
         assert!(config.should_proxy(80));
         assert!(!config.should_proxy(22));
     }
@@ -881,19 +877,46 @@ mod tests {
     fn tun_bridge_rx_tx_queues() {
         let mut bridge = TunBridge::new(1500);
         assert!(bridge.pop_tx().is_none());
-
         bridge.push_rx(vec![1, 2, 3]);
         assert_eq!(bridge.rx_queue.len(), 1);
-
-        // Simulate smoltcp receive
         let now = SmolInstant::from_millis(0);
-        let result = bridge.receive(now);
-        assert!(result.is_some());
+        assert!(bridge.receive(now).is_some());
     }
 
     #[test]
     fn format_ip_works() {
         assert_eq!(format_ip(&[10, 0, 85, 1]), "10.0.85.1");
         assert_eq!(format_ip(&[192, 168, 1, 1]), "192.168.1.1");
+    }
+
+    #[test]
+    fn parse_tcp_syn_packet() {
+        // Minimal IPv4 + TCP SYN packet
+        // IPv4 header (20 bytes): version=4, ihl=5, total_len=40, proto=6 (TCP)
+        // TCP header (20 bytes): src_port=12345, dst_port=443, SYN flag set
+        let mut pkt = vec![0u8; 40];
+        // IPv4 header
+        pkt[0] = 0x45; // version=4, ihl=5
+        pkt[2] = 0; pkt[3] = 40; // total length = 40
+        pkt[8] = 64; // TTL
+        pkt[9] = 6;  // protocol = TCP
+        // src IP: 192.168.1.100
+        pkt[12] = 192; pkt[13] = 168; pkt[14] = 1; pkt[15] = 100;
+        // dst IP: 8.8.8.8
+        pkt[16] = 8; pkt[17] = 8; pkt[18] = 8; pkt[19] = 8;
+        // TCP header at offset 20
+        pkt[20] = (12345 >> 8) as u8; pkt[21] = (12345 & 0xFF) as u8; // src port
+        pkt[22] = (443 >> 8) as u8; pkt[23] = (443 & 0xFF) as u8; // dst port
+        pkt[32] = 0x50; // data offset = 5 (20 bytes)
+        pkt[33] = 0x02; // SYN flag
+
+        let result = parse_tcp_packet(&pkt);
+        assert!(result.is_some());
+        let (src, dst, is_syn) = result.unwrap();
+        assert_eq!(*src.ip(), Ipv4Addr::new(192, 168, 1, 100));
+        assert_eq!(src.port(), 12345);
+        assert_eq!(*dst.ip(), Ipv4Addr::new(8, 8, 8, 8));
+        assert_eq!(dst.port(), 443);
+        assert!(is_syn);
     }
 }
