@@ -208,14 +208,17 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
                         .size(11.0)
                         .color(super::TEXT_SECONDARY),
                 );
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut state.data.tun_addr)
-                        .desired_width(160.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                if resp.changed() {
-                    state.needs_save = true;
-                }
+                super::input_field_scope(ui, |ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut state.data.tun_addr)
+                            .desired_width(160.0)
+                            .margin(egui::vec2(8.0, 4.0))
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if resp.changed() {
+                        state.needs_save = true;
+                    }
+                });
                 ui.label(
                     RichText::new("Restart proxy to apply")
                         .size(10.0)
