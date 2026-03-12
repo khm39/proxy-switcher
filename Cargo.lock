@@ -3079,6 +3079,7 @@ dependencies = [
  "egui",
  "env_logger",
  "etherparse",
+ "libc",
  "log",
  "reqwest",
  "serde",
