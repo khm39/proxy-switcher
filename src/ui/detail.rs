@@ -106,17 +106,21 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
             ui.add_space(8.0);
 
-            match state.detail_tab {
-                DetailTab::Basic => {
-                    render_basic_tab(ui, state, &proxy_id);
-                }
-                DetailTab::PortFilter => {
-                    render_port_filter_tab(ui, state, &proxy_id);
-                }
-                DetailTab::Note => {
-                    render_note_tab(ui, state, &proxy_id);
-                }
-            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    match state.detail_tab {
+                        DetailTab::Basic => {
+                            render_basic_tab(ui, state, &proxy_id);
+                        }
+                        DetailTab::PortFilter => {
+                            render_port_filter_tab(ui, state, &proxy_id);
+                        }
+                        DetailTab::Note => {
+                            render_note_tab(ui, state, &proxy_id);
+                        }
+                    }
+                });
         });
 }
 
@@ -155,7 +159,7 @@ fn render_basic_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
         .stroke(egui::Stroke::new(1.0, super::BORDER))
         .show(ui, |ui| {
             super::input_field_scope(ui, |ui| {
-                let field_width = ui.available_width();
+                let field_width = (ui.available_width() - 4.0).max(100.0);
 
                 // Proxy Name *
                 required_label(ui, "Proxy Name");
@@ -412,7 +416,7 @@ fn render_port_filter_tab(ui: &mut Ui, state: &mut AppState, proxy_id: &str) {
                     );
                     let resp = ui.add(
                         egui::TextEdit::singleline(&mut pf.raw_input)
-                            .desired_width(300.0)
+                            .desired_width(ui.available_width())
                             .margin(egui::vec2(8.0, 4.0))
                             .hint_text("e.g. 80, 443, 8080"),
                     );
