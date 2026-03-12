@@ -213,29 +213,62 @@ impl Default for ProxyStatus {
 // ---------------------------------------------------------------------------
 
 fn create_tun_device() -> Result<tun_rs::AsyncDevice, String> {
-    tun_rs::DeviceBuilder::new()
+    let mut builder = tun_rs::DeviceBuilder::new();
+    builder = builder
         .name(TUN_NAME)
         .ipv4(TUN_ADDR, TUN_CIDR_PREFIX, None)
-        .mtu(TUN_MTU)
-        .build_async()
-        .map_err(|e| {
-            let msg = format!("{e}");
-            // Detect Wintun DLL load failure on Windows
-            if msg.contains("LoadLibrary") || msg.contains("wintun") {
-                format!(
-                    "Wintun driver not found. Please download wintun.dll from \
-                     https://www.wintun.net/ and place it next to the executable. \
-                     (Details: {e})"
-                )
-            } else if msg.contains("permission") || msg.contains("denied") || msg.contains("EPERM") {
-                format!(
-                    "Permission denied creating TUN device. \
-                     Run as Administrator (Windows) or root (Linux). (Details: {e})"
-                )
-            } else {
-                format!("Failed to create TUN device: {e}")
+        .mtu(TUN_MTU);
+
+    // On Windows, resolve wintun.dll path relative to the executable
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(dll_path) = find_wintun_dll() {
+            builder = builder.wintun_file(dll_path);
+        }
+    }
+
+    builder.build_async().map_err(|e| {
+        let msg = format!("{e}");
+        if msg.contains("LoadLibrary") || msg.contains("wintun") {
+            format!(
+                "Wintun driver not found. Please download wintun.dll from \
+                 https://www.wintun.net/ and place it next to the executable \
+                 or in the current directory. (Details: {e})"
+            )
+        } else if msg.contains("permission") || msg.contains("denied") || msg.contains("EPERM") {
+            format!(
+                "Permission denied creating TUN device. \
+                 Run as Administrator (Windows) or root (Linux). (Details: {e})"
+            )
+        } else {
+            format!("Failed to create TUN device: {e}")
+        }
+    })
+}
+
+/// Search for wintun.dll in common locations.
+#[cfg(target_os = "windows")]
+fn find_wintun_dll() -> Option<String> {
+    // 1. Next to the executable
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidate = exe_dir.join("wintun.dll");
+            if candidate.exists() {
+                return Some(candidate.to_string_lossy().into_owned());
             }
-        })
+        }
+    }
+
+    // 2. Current working directory
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join("wintun.dll");
+        if candidate.exists() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+
+    // 3. Let tun-rs use its default search (system PATH etc.)
+    None
 }
 
 // ---------------------------------------------------------------------------
